@@ -9,6 +9,7 @@ const state = {
   sortKey: null,
   sortDirection: null,
   refreshTimer: null,
+  alertDrafts: new Map(),
 };
 
 const byId = (id) => document.getElementById(id);
@@ -226,9 +227,9 @@ function renderKpis(payload, rows) {
     ? `Весь счёт · Activity Flex на ${formatDate(cash.asOf)}`
     : "Добавьте Cash Report в Activity Flex";
   const cards = [
+    ["Кэш на балансе", cash.endingCash, cashNote, false],
     ["Рыночная стоимость", totals.marketValueUsd, "Открытые позиции"],
     ["AVCO-себестоимость открытых позиций", totals.openBasisUsd, ""],
-    ["Кэш на балансе", cash.endingCash, cashNote, false],
     ["Нереализованный P&L", totals.unrealizedPnlUsd, "Текущий"],
     ["Реализованный P&L", totals.realizedPnlUsd, "Выбранные инструменты"],
     ["Чистые дивиденды", totals.dividendsNetUsd, "После налогов"],
@@ -376,6 +377,60 @@ function statusClass(row) {
   return isOpen(row) ? "open" : "closed";
 }
 
+function alertDraftValue(row, side) {
+  return state.alertDrafts.get(`${row.conid}:${side}`) || "";
+}
+
+function breakEvenMarkup(row) {
+  if (row.breakEvenStatus === "AVAILABLE" && row.breakEvenPrice != null) {
+    const action = row.breakEvenCondition === "BUY_AT_OR_BELOW"
+      ? "Покупка остатка не дороже"
+      : "Продажа остатка не дешевле";
+    return `
+      <div class="break-even-card">
+        <span>Безубыточность всей истории</span>
+        <strong>${formatMoney(row.breakEvenPrice, row.currency)}</strong>
+        <small>${action} этой цены · учтены все проведённые комиссии и чистые дивиденды; будущая комиссия закрытия не включена</small>
+      </div>
+    `;
+  }
+  const reason = row.breakEvenStatus === "NO_OPEN_POSITION"
+    ? "Нет открытого остатка"
+    : row.breakEvenStatus === "UNREACHABLE"
+      ? "При текущем остатке безубыточность недостижима"
+      : "Не хватает актуального FX-курса";
+  return `
+    <div class="break-even-card unavailable">
+      <span>Безубыточность всей истории</span>
+      <strong>—</strong>
+      <small>${escapeHtml(reason)}</small>
+    </div>
+  `;
+}
+
+function alertMarkup(row) {
+  return `
+    <div class="alert-panel">
+      <div class="alert-heading">
+        <div><h3>Ценовые алерты</h3><p>Доступны для любого инструмента из истории</p></div>
+        <span class="alert-draft-status">Черновик · VPS ещё не подключён</span>
+      </div>
+      <div class="alert-grid">
+        <label class="alert-control buy-alert">
+          <span>Покупка <small>Ask ≤</small></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="buy" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "buy"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+        </label>
+        <label class="alert-control sell-alert">
+          <span>Продажа <small>Bid ≥</small></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="sell" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "sell"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+        </label>
+        ${breakEvenMarkup(row)}
+      </div>
+      <p class="alert-footnote">Введённые уровни пока сохраняются только до закрытия вкладки и не отправляют Telegram-уведомления. После подключения VPS эти же поля станут рабочими.</p>
+    </div>
+  `;
+}
+
 function detailHtml(row) {
   const cycles = [...(row.cycles || [])].reverse();
   const cycleMarkup = cycles.map((cycle) => {
@@ -410,12 +465,14 @@ function detailHtml(row) {
             <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
             <div class="detail-item"><span>История тикеров</span><strong>${escapeHtml((row.symbolHistory || []).join(" → ") || row.symbol)}</strong></div>
             <div class="detail-item"><span>AVCO-себестоимость открытой позиции</span><strong>${isOpen(row) ? formatMoney(row.openBasis, row.currency) : "—"}</strong></div>
-            <div class="detail-item"><span>Дивиденды в валюте инструмента</span><strong>${formatMoney(row.dividendsNet, row.currency)}</strong></div>
+            <div class="detail-item"><span>Дивиденды gross</span><strong>${formatMoney(row.dividendsGross, row.currency)}</strong></div>
+            <div class="detail-item"><span>Withholding tax</span><strong class="${pnlClass(row.withholdingTax)}">${formatMoney(row.withholdingTax, row.currency)}</strong></div>
+            <div class="detail-item"><span>Дивиденды net, после налогов</span><strong>${formatMoney(row.dividendsNet, row.currency)}</strong></div>
           </div>
           ${review}
           ${corporateActions}
         </section>
-        <section class="detail-section"><h3>Позиционные циклы</h3><div class="cycle-list">${cycleMarkup}</div></section>
+        <section class="detail-section"><h3>Позиционные циклы</h3><div class="cycle-list">${cycleMarkup}</div>${alertMarkup(row)}</section>
       </div>
     </td></tr>
   `;
@@ -468,6 +525,13 @@ function renderRows() {
       const conid = element.dataset.conid;
       state.expanded.has(conid) ? state.expanded.delete(conid) : state.expanded.add(conid);
       renderRows();
+    });
+  });
+  portfolioBody.querySelectorAll("input[data-alert-side]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const key = `${input.dataset.conid}:${input.dataset.alertSide}`;
+      if (input.value) state.alertDrafts.set(key, input.value);
+      else state.alertDrafts.delete(key);
     });
   });
 }

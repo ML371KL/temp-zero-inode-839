@@ -235,6 +235,28 @@ th:first-child { z-index: 3; background: #10202f; }
 .cycle-item { display: grid; grid-template-columns: 52px 1fr repeat(4, minmax(80px, auto)); gap: 10px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; }
 .cycle-item > span { color: var(--muted); font-size: 8px; }
 .cycle-item strong { display: block; color: var(--text); font-size: 9px; }
+.alert-panel { margin-top: 12px; padding: 12px; border: 1px solid rgba(131, 224, 193, 0.16); border-radius: 11px; background: rgba(131, 224, 193, 0.025); }
+.alert-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
+.alert-heading h3 { margin: 0 0 3px; }
+.alert-heading p, .alert-footnote { margin: 0; color: var(--faint); font-size: 8px; line-height: 1.45; }
+.alert-draft-status { flex: 0 0 auto; padding: 4px 7px; border-radius: 99px; color: var(--warning); background: rgba(255, 198, 109, 0.07); font-size: 7px; text-transform: uppercase; letter-spacing: 0.04em; }
+.alert-grid { display: grid; grid-template-columns: minmax(135px, 0.8fr) minmax(135px, 0.8fr) minmax(230px, 1.4fr); gap: 7px; }
+.alert-control, .break-even-card { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(4, 13, 21, 0.26); }
+.alert-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: text; }
+.alert-control > span:first-child { color: var(--text); font: 600 9px/1.25 "Segoe UI", system-ui, sans-serif; }
+.alert-control small { display: block; margin-top: 2px; color: var(--faint); font-size: 7px; font-weight: 500; }
+.buy-alert { border-color: rgba(125, 224, 179, 0.16); }
+.sell-alert { border-color: rgba(123, 185, 239, 0.16); }
+.alert-input-wrap { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.alert-input-wrap input { width: 76px; border: 1px solid var(--line); border-radius: 7px; outline: 0; padding: 7px 6px; color: var(--text); background: #0b1925; font: 500 9px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.alert-input-wrap input:focus { border-color: rgba(131, 224, 193, 0.55); }
+.alert-input-wrap b { color: var(--faint); font-size: 7px; font-weight: 600; }
+.break-even-card span, .break-even-card strong, .break-even-card small { display: block; }
+.break-even-card span { color: var(--faint); font-size: 7px; text-transform: uppercase; letter-spacing: 0.04em; }
+.break-even-card strong { margin-top: 4px; color: var(--accent); font: 600 13px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.break-even-card small { margin-top: 3px; color: var(--muted); font-size: 7px; line-height: 1.35; }
+.break-even-card.unavailable strong { color: var(--faint); }
+.alert-footnote { margin-top: 7px; }
 .review-box { margin-top: 12px; padding: 10px; border: 1px solid rgba(255, 198, 109, 0.2); border-radius: 9px; color: var(--warning); background: rgba(255, 198, 109, 0.045); font: 400 9px/1.6 "Segoe UI", system-ui, sans-serif; }
 .empty-state { padding: 50px 20px; color: var(--faint); text-align: center; font-size: 12px; }
 
@@ -254,6 +276,8 @@ footer button { border: 0; padding: 0; color: var(--muted); background: transpar
   .filter-bar { align-items: flex-start; flex-direction: column; }
   .select-filters { width: 100%; overflow-x: auto; }
   .detail-wrap { grid-template-columns: 1fr; }
+  .alert-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .break-even-card { grid-column: 1 / -1; }
 }
 
 @media (max-width: 760px) {
@@ -283,6 +307,9 @@ footer button { border: 0; padding: 0; color: var(--muted); background: transpar
   .cycle-item { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; padding: 12px; }
   .cycle-item .cycle-number, .cycle-item .cycle-period { grid-column: 1 / -1; }
   .cycle-item > span { min-width: 0; }
+  .alert-heading { flex-direction: column; }
+  .alert-grid { grid-template-columns: 1fr; }
+  .break-even-card { grid-column: auto; }
   .issue-item { grid-template-columns: 60px 1fr; }
   .issue-message { grid-column: 1 / -1; }
   footer { align-items: flex-start; flex-direction: column; }
