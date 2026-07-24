@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0c1724" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
+    <title>Portfolio Ledger</title>
+    <link rel="stylesheet" href="styles.css?v=20260724" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="Portfolio Ledger">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span>
+            <strong>Portfolio Ledger</strong>
+            <small>IBKR · encrypted locally</small>
+          </span>
+        </a>
+        <div class="top-actions">
+          <button id="refreshButton" class="icon-button" type="button" title="Обновить данные" hidden>
+            <span aria-hidden="true">↻</span><span class="desktop-label">Обновить</span>
+          </button>
+          <button id="lockButton" class="icon-button" type="button" title="Заблокировать" hidden>
+            <span aria-hidden="true">⌁</span><span class="desktop-label">Закрыть</span>
+          </button>
+        </div>
+      </header>
+
+      <section id="unlockView" class="unlock-layout" aria-labelledby="unlockTitle">
+        <div class="intro-copy">
+          <p class="eyebrow">PRIVATE PORTFOLIO</p>
+          <h1 id="unlockTitle">Весь журнал сделок.<br /><em>Только для вас.</em></h1>
+          <p class="intro-text">
+            Данные зашифрованы до публикации. Пароль обрабатывается только на этом устройстве
+            и никогда не отправляется на GitHub или другой сервер.
+          </p>
+          <div class="security-note">
+            <span class="security-dot" aria-hidden="true"></span>
+            AES-256-GCM · PBKDF2 · read-only
+          </div>
+        </div>
+
+        <form id="unlockForm" class="unlock-card">
+          <div class="lock-glyph" aria-hidden="true">⌾</div>
+          <h2>Открыть портфель</h2>
+          <p>Введите пароль, установленный в секретах приватного репозитория.</p>
+          <label for="passwordInput">Пароль</label>
+          <div class="password-field">
+            <input id="passwordInput" name="password" type="password" autocomplete="current-password" required />
+            <button id="togglePassword" type="button" aria-label="Показать или скрыть пароль">Показать</button>
+          </div>
+          <label class="remember-row">
+            <input id="rememberDevice" type="checkbox" />
+            <span>
+              <strong>Запомнить это устройство</strong>
+              <small>Ключ останется в защищённом хранилище этого браузера.</small>
+            </span>
+          </label>
+          <button id="unlockButton" class="primary-button" type="submit">
+            <span>Расшифровать</span><span aria-hidden="true">→</span>
+          </button>
+          <p id="unlockMessage" class="form-message" role="status"></p>
+        </form>
+      </section>
+
+      <section id="dashboardView" hidden>
+        <div id="dataStatus" class="data-status"></div>
+
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow">PORTFOLIO OVERVIEW</p>
+            <h1>Журнал портфеля</h1>
+          </div>
+          <div class="as-of">
+            <span>Снимок данных</span>
+            <strong id="generatedAt">—</strong>
+          </div>
+        </div>
+
+        <section id="kpiGrid" class="kpi-grid" aria-label="Ключевые показатели"></section>
+
+        <section class="portfolio-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Инструменты</h2>
+              <p id="resultCount">—</p>
+            </div>
+            <div class="search-wrap">
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Тикер, компания, Conid…" />
+            </div>
+          </div>
+
+          <div class="filter-bar">
+            <div id="quickTabs" class="quick-tabs" role="tablist">
+              <button type="button" data-tab="all" class="active">Все</button>
+              <button type="button" data-tab="open">Открытые</button>
+              <button type="button" data-tab="closed">Закрытые</button>
+              <button type="button" data-tab="review">Проверить</button>
+            </div>
+            <div class="select-filters">
+              <select id="assetFilter" aria-label="Класс актива"><option value="">Все классы</option></select>
+              <select id="directionFilter" aria-label="Направление">
+                <option value="">Long + Short</option><option value="LONG">Long</option><option value="SHORT">Short</option>
+              </select>
+              <select id="currencyFilter" aria-label="Валюта"><option value="">Все валюты</option></select>
+              <select id="profitFilter" aria-label="Результат">
+                <option value="">Любой результат</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Инструмент</th><th>Статус</th><th>Цикл</th><th class="numeric">Количество</th>
+                  <th class="numeric">Средний вход</th><th class="numeric">Средний выход</th>
+                  <th class="numeric">Текущая цена</th><th class="numeric">Стоимость, USD</th>
+                  <th class="numeric">Нереализ., USD</th><th class="numeric">Реализ., USD</th>
+                  <th class="numeric">Дивиденды, USD</th><th class="numeric">Итого, USD</th><th>Валюта</th>
+                </tr>
+              </thead>
+              <tbody id="portfolioBody"></tbody>
+            </table>
+          </div>
+          <div id="emptyState" class="empty-state" hidden>По выбранным фильтрам ничего не найдено.</div>
+        </section>
+
+        <section id="issuesPanel" class="issues-panel" hidden>
+          <div class="panel-heading"><div><h2>Требуют внимания</h2><p>IBKR-сверка и необработанные события</p></div></div>
+          <div id="issuesList" class="issues-list"></div>
+        </section>
+
+        <footer>
+          <span>Расшифровано локально · пароль не покидает устройство</span>
+          <button id="forgetDevice" type="button">Забыть это устройство</button>
+        </footer>
+      </section>
+    </main>
+
+    <script src="app.js?v=20260724" defer></script>
+  </body>
+</html>
