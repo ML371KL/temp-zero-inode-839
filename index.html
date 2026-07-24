@@ -9,7 +9,7 @@
     <meta name="referrer" content="no-referrer" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
     <title>Portfolio Ledger</title>
-    <link rel="stylesheet" href="styles.css?v=20260724" />
+    <link rel="stylesheet" href="styles.css?v=20260724-3" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -85,6 +85,10 @@
           </div>
         </div>
 
+        <div class="kpi-heading">
+          <span>Итоги по выбранным инструментам</span>
+          <strong id="kpiContext" aria-live="polite">Все инструменты</strong>
+        </div>
         <section id="kpiGrid" class="kpi-grid" aria-label="Ключевые показатели"></section>
 
         <section class="portfolio-panel">
@@ -123,7 +127,7 @@
               <thead>
                 <tr>
                   <th>Инструмент</th><th>Статус</th><th>Цикл</th><th class="numeric">Количество</th>
-                  <th class="numeric">Средний вход</th><th class="numeric">Средний выход</th>
+                  <th class="numeric">Средний вход, AVCO</th><th class="numeric">Средний выход (закр.)</th>
                   <th class="numeric">Текущая цена</th><th class="numeric">Стоимость, USD</th>
                   <th class="numeric">Нереализ., USD</th><th class="numeric">Реализ., USD</th>
                   <th class="numeric">Дивиденды, USD</th><th class="numeric">Итого, USD</th><th>Валюта</th>
@@ -147,6 +151,6 @@
       </section>
     </main>
 
-    <script src="app.js?v=20260724" defer></script>
+    <script src="app.js?v=20260724-3" defer></script>
   </body>
 </html>

@@ -177,21 +177,61 @@ function pnlClass(value) {
   return parsed > 0 ? "positive" : "negative";
 }
 
-function renderKpis(payload) {
-  const totals = payload.totals || {};
+function aggregateRows(rows) {
+  const fields = [
+    "marketValueUsd",
+    "openBasisUsd",
+    "unrealizedPnlUsd",
+    "realizedPnlUsd",
+    "dividendsNetUsd",
+    "totalResultUsd",
+  ];
+  const totals = Object.fromEntries(fields.map((field) => [field, 0]));
+  let partial = false;
+
+  for (const row of rows) {
+    for (const field of fields) {
+      const value = numberValue(row[field]);
+      if (value !== null) totals[field] += value;
+    }
+    if (isOpen(row) && [row.marketValueUsd, row.openBasisUsd, row.unrealizedPnlUsd]
+      .some((value) => numberValue(value) === null)) {
+      partial = true;
+    }
+  }
+  return { totals, partial };
+}
+
+function filterContext(rows) {
+  const total = state.payload?.rows?.length || 0;
+  const tabLabels = { open: "Открытые", closed: "Закрытые", review: "Требуют проверки" };
+  const parts = [];
+  if (tabLabels[state.activeTab]) parts.push(tabLabels[state.activeTab]);
+  const search = byId("searchInput").value.trim();
+  if (search) parts.push(`поиск «${search}»`);
+  for (const id of ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]) {
+    const select = byId(id);
+    if (select.value) parts.push(select.selectedOptions[0]?.textContent || select.value);
+  }
+  return `${rows.length} из ${total}${parts.length ? ` · ${parts.join(" · ")}` : " · все инструменты"}`;
+}
+
+function renderKpis(payload, rows) {
+  const { totals, partial } = aggregateRows(rows);
   const cards = [
     ["Рыночная стоимость", totals.marketValueUsd, "Открытые позиции"],
-    ["Себестоимость", totals.openBasisUsd, "Открытые позиции"],
+    ["AVCO-себестоимость открытых позиций", totals.openBasisUsd, "Средний вход × текущий остаток"],
     ["Нереализованный P&L", totals.unrealizedPnlUsd, "Текущий"],
-    ["Реализованный P&L", totals.realizedPnlUsd, "Вся история"],
+    ["Реализованный P&L", totals.realizedPnlUsd, "Выбранные инструменты"],
     ["Чистые дивиденды", totals.dividendsNetUsd, "После налогов"],
-    ["Общий результат", totals.totalResultUsd, "Вся история"],
+    ["Общий результат", totals.totalResultUsd, "Выбранные инструменты"],
   ];
+  byId("kpiContext").textContent = filterContext(rows);
   byId("kpiGrid").innerHTML = cards.map(([label, value, note]) => `
     <article class="kpi-card">
       <span>${escapeHtml(label)}</span>
       <strong class="${label.includes("P&L") || label.includes("результат") ? pnlClass(value) : ""}">${formatMoney(value, payload.baseCurrency || "USD")}</strong>
-      <small>${escapeHtml(note)}${payload.totalsArePartial ? " · неполные FX/цены" : ""}</small>
+      <small>${escapeHtml(note)}${partial ? " · неполные FX/цены" : ""}</small>
     </article>
   `).join("");
 }
@@ -280,16 +320,21 @@ function statusClass(row) {
 
 function detailHtml(row) {
   const cycles = [...(row.cycles || [])].reverse();
-  const cycleMarkup = cycles.map((cycle) => `
-    <div class="cycle-item">
-      <span>Цикл ${cycle.number}</span>
-      <span><strong>${escapeHtml(cycle.direction)}</strong>${formatDate(cycle.openedAt)} → ${formatDate(cycle.closedAt)}</span>
-      <span><strong>${formatNumber(cycle.quantity, 8)}</strong>остаток</span>
-      <span><strong>${formatMoney(cycle.averageEntry, row.currency)}</strong>средний вход</span>
-      <span><strong>${formatMoney(cycle.averageExit, row.currency)}</strong>средний выход</span>
-      <span><strong class="${pnlClass(cycle.realizedPnlUsd)}">${formatMoney(cycle.realizedPnlUsd, "USD")}</strong>${(cycle.trades || []).length} операций</span>
-    </div>
-  `).join("") || '<div class="muted-value">Циклы отсутствуют</div>';
+  const cycleMarkup = cycles.map((cycle) => {
+    const fallbackResult = (numberValue(cycle.realizedPnlUsd) || 0)
+      + (numberValue(cycle.dividendsNetUsd) || 0);
+    const totalResult = numberValue(cycle.totalResultUsd) ?? fallbackResult;
+    return `
+      <div class="cycle-item">
+        <span class="cycle-number">Цикл ${cycle.number}</span>
+        <span class="cycle-period"><strong>${escapeHtml(cycle.direction)}</strong>${formatDate(cycle.openedAt)} → ${formatDate(cycle.closedAt)}</span>
+        <span><strong>${formatNumber(cycle.quantity, 8)}</strong>остаток</span>
+        <span><strong>${formatMoney(cycle.averageEntry, row.currency)}</strong>средний вход</span>
+        <span><strong>${formatMoney(cycle.averageExit, row.currency)}</strong>средний выход</span>
+        <span><strong class="${pnlClass(totalResult)}">${formatMoney(totalResult, "USD")}</strong>общий результат · ${(cycle.trades || []).length} операций</span>
+      </div>
+    `;
+  }).join("") || '<div class="muted-value">Циклы отсутствуют</div>';
   const review = (row.reviewReasons || []).length
     ? `<div class="review-box">${row.reviewReasons.map(escapeHtml).join("<br>")}</div>`
     : "";
@@ -303,7 +348,7 @@ function detailHtml(row) {
             <div class="detail-item"><span>Биржа</span><strong>${escapeHtml(row.exchange || "—")}</strong></div>
             <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
             <div class="detail-item"><span>История тикеров</span><strong>${escapeHtml((row.symbolHistory || []).join(" → ") || row.symbol)}</strong></div>
-            <div class="detail-item"><span>Себестоимость цикла</span><strong>${formatMoney(row.openBasis, row.currency)}</strong></div>
+            <div class="detail-item"><span>AVCO-себестоимость открытой позиции</span><strong>${isOpen(row) ? formatMoney(row.openBasis, row.currency) : "—"}</strong><small class="detail-item-help">Средний вход × текущий остаток. В отличие от рыночной стоимости, текущая цена здесь не используется.</small></div>
             <div class="detail-item"><span>Дивиденды в валюте инструмента</span><strong>${formatMoney(row.dividendsNet, row.currency)}</strong></div>
           </div>
           ${review}
@@ -317,6 +362,16 @@ function detailHtml(row) {
 function rowHtml(row) {
   const quote = row.currentPrice || {};
   const price = quote.price == null ? "—" : formatMoney(quote.price, row.currency);
+  const freshnessLabels = {
+    stale: "устарела",
+    fallback: "резервная",
+    unavailable: "нет данных",
+  };
+  const priceMeta = [
+    quote.type || "UNAVAILABLE",
+    formatDate(quote.marketTime, true),
+    freshnessLabels[String(quote.freshness || "").toLowerCase()],
+  ].filter(Boolean).join(" · ");
   const cycleDates = `${formatDate(row.cycleOpenedAt)} → ${formatDate(row.cycleClosedAt)}`;
   const initial = escapeHtml((row.symbol || "?").slice(0, 2).toUpperCase());
   return `
@@ -326,8 +381,8 @@ function rowHtml(row) {
       <td>${cycleDates}</td>
       <td class="numeric">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(row.averageEntry, row.currency)}</td>
-      <td class="numeric">${formatMoney(row.averageExit, row.currency)}</td>
-      <td class="numeric">${price}<span class="price-note">${escapeHtml(quote.type || "UNAVAILABLE")} · ${formatDate(quote.marketTime, true)}</span></td>
+      <td class="numeric">${isOpen(row) ? "—" : formatMoney(row.averageExit, row.currency)}</td>
+      <td class="numeric">${price}<span class="price-note ${quote.freshness === "stale" ? "quote-stale" : ""}">${escapeHtml(priceMeta)}</span></td>
       <td class="numeric">${formatMoney(row.marketValueUsd, "USD")}</td>
       <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatMoney(row.unrealizedPnlUsd, "USD")}</td>
       <td class="numeric ${pnlClass(row.realizedPnlUsd)}">${formatMoney(row.realizedPnlUsd, "USD")}</td>
@@ -341,6 +396,7 @@ function rowHtml(row) {
 
 function renderRows() {
   const rows = filteredRows();
+  renderKpis(state.payload, rows);
   portfolioBody.innerHTML = rows.map(rowHtml).join("");
   byId("resultCount").textContent = `${rows.length} из ${state.payload?.rows?.length || 0}`;
   byId("emptyState").hidden = rows.length > 0;
@@ -375,7 +431,6 @@ function renderDashboard(payload) {
   state.payload = payload;
   byId("generatedAt").textContent = formatDate(payload.generatedAt, true);
   renderStatus(payload);
-  renderKpis(payload);
   renderFilterOptions(payload.rows || []);
   renderRows();
   renderIssues(payload);
