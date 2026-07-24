@@ -9,7 +9,7 @@
     <meta name="referrer" content="no-referrer" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
     <title>Portfolio Ledger</title>
-    <link rel="stylesheet" href="styles.css?v=20260724-3" />
+    <link rel="stylesheet" href="styles.css?v=20260724-4" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -25,8 +25,9 @@
           </span>
         </a>
         <div class="top-actions">
+          <span id="refreshFeedback" class="refresh-feedback" role="status" aria-live="polite"></span>
           <button id="refreshButton" class="icon-button" type="button" title="Обновить данные" hidden>
-            <span aria-hidden="true">↻</span><span class="desktop-label">Обновить</span>
+            <span class="refresh-icon" aria-hidden="true">↻</span><span id="refreshButtonLabel" class="desktop-label">Обновить</span>
           </button>
           <button id="lockButton" class="icon-button" type="button" title="Заблокировать" hidden>
             <span aria-hidden="true">⌁</span><span class="desktop-label">Закрыть</span>
@@ -124,13 +125,28 @@
 
           <div class="table-wrap">
             <table>
+              <colgroup>
+                <col class="column-instrument" /><col class="column-status" /><col class="column-cycle" />
+                <col class="column-quantity" /><col class="column-entry" /><col class="column-exit" />
+                <col class="column-price" /><col class="column-money" /><col class="column-money" />
+                <col class="column-money" /><col class="column-money" /><col class="column-money" />
+                <col class="column-currency" />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Инструмент</th><th>Статус</th><th>Цикл</th><th class="numeric">Количество</th>
-                  <th class="numeric">Средний вход, AVCO</th><th class="numeric">Средний выход (закр.)</th>
-                  <th class="numeric">Текущая цена</th><th class="numeric">Стоимость, USD</th>
-                  <th class="numeric">Нереализ., USD</th><th class="numeric">Реализ., USD</th>
-                  <th class="numeric">Дивиденды, USD</th><th class="numeric">Итого, USD</th><th>Валюта</th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="instrument">Инструмент <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="status">Статус <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="cycle">Цикл <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="quantity">Количество <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageEntry">Средний вход, AVCO <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageExit">Средний выход (закр.) <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="currentPrice">Текущая цена <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="marketValueUsd">Стоимость, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="unrealizedPnlUsd">Нереализ., USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="realizedPnlUsd">Реализ., USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="dividendsNetUsd">Дивиденды, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="totalResultUsd">Итого, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="currency">Валюта <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                 </tr>
               </thead>
               <tbody id="portfolioBody"></tbody>
@@ -151,6 +167,6 @@
       </section>
     </main>
 
-    <script src="app.js?v=20260724-3" defer></script>
+    <script src="app.js?v=20260724-4" defer></script>
   </body>
 </html>
