@@ -221,20 +221,25 @@ function filterContext(rows) {
 
 function renderKpis(payload, rows) {
   const { totals, partial } = aggregateRows(rows);
+  const cash = payload.cash || {};
+  const cashNote = cash.available
+    ? `Весь счёт · Activity Flex на ${formatDate(cash.asOf)}`
+    : "Добавьте Cash Report в Activity Flex";
   const cards = [
     ["Рыночная стоимость", totals.marketValueUsd, "Открытые позиции"],
-    ["AVCO-себестоимость открытых позиций", totals.openBasisUsd, "Средний вход × текущий остаток"],
+    ["AVCO-себестоимость открытых позиций", totals.openBasisUsd, ""],
+    ["Кэш на балансе", cash.endingCash, cashNote, false],
     ["Нереализованный P&L", totals.unrealizedPnlUsd, "Текущий"],
     ["Реализованный P&L", totals.realizedPnlUsd, "Выбранные инструменты"],
     ["Чистые дивиденды", totals.dividendsNetUsd, "После налогов"],
     ["Общий результат", totals.totalResultUsd, "Выбранные инструменты"],
   ];
   byId("kpiContext").textContent = filterContext(rows);
-  byId("kpiGrid").innerHTML = cards.map(([label, value, note]) => `
+  byId("kpiGrid").innerHTML = cards.map(([label, value, note, filtered = true]) => `
     <article class="kpi-card">
       <span>${escapeHtml(label)}</span>
       <strong class="${label.includes("P&L") || label.includes("результат") ? pnlClass(value) : ""}">${formatMoney(value, payload.baseCurrency || "USD")}</strong>
-      <small>${escapeHtml(note)}${partial ? " · неполные FX/цены" : ""}</small>
+      ${(note || (partial && filtered)) ? `<small>${escapeHtml(note)}${partial && filtered ? `${note ? " · " : ""}неполные FX/цены` : ""}</small>` : ""}
     </article>
   `).join("");
 }
@@ -391,6 +396,9 @@ function detailHtml(row) {
   const review = (row.reviewReasons || []).length
     ? `<div class="review-box">${row.reviewReasons.map(escapeHtml).join("<br>")}</div>`
     : "";
+  const corporateActions = (row.corporateActions || []).length
+    ? `<div class="corporate-history"><strong>Корпоративные действия</strong>${row.corporateActions.map((event) => `<span>${formatDate(event.timestamp)} · ${escapeHtml(event.description || event.category)}</span>`).join("")}</div>`
+    : "";
   return `
     <tr class="detail-row"><td colspan="13">
       <div class="detail-wrap">
@@ -405,6 +413,7 @@ function detailHtml(row) {
             <div class="detail-item"><span>Дивиденды в валюте инструмента</span><strong>${formatMoney(row.dividendsNet, row.currency)}</strong></div>
           </div>
           ${review}
+          ${corporateActions}
         </section>
         <section class="detail-section"><h3>Позиционные циклы</h3><div class="cycle-list">${cycleMarkup}</div></section>
       </div>
