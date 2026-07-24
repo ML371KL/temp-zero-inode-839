@@ -6,6 +6,9 @@ const state = {
   cryptoKey: null,
   activeTab: "all",
   expanded: new Set(),
+  sortKey: null,
+  sortDirection: null,
+  refreshTimer: null,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -276,13 +279,69 @@ function isOpen(row) {
   return Math.abs(numberValue(row.quantity) || 0) > 1e-8;
 }
 
+const SORT_ACCESSORS = {
+  instrument: (row) => `${row.symbol || ""} ${row.instrument || ""}`,
+  status: (row) => statusLabel(row),
+  cycle: (row) => row.cycleOpenedAt || "",
+  quantity: (row) => numberValue(row.quantity),
+  averageEntry: (row) => numberValue(row.averageEntry),
+  averageExit: (row) => numberValue(row.averageExit),
+  currentPrice: (row) => numberValue(row.currentPrice?.price),
+  marketValueUsd: (row) => numberValue(row.marketValueUsd),
+  unrealizedPnlUsd: (row) => numberValue(row.unrealizedPnlUsd),
+  realizedPnlUsd: (row) => numberValue(row.realizedPnlUsd),
+  dividendsNetUsd: (row) => numberValue(row.dividendsNetUsd),
+  totalResultUsd: (row) => numberValue(row.totalResultUsd),
+  currency: (row) => row.currency || "",
+};
+
+function defaultRowCompare(left, right) {
+  const openDifference = Number(isOpen(right)) - Number(isOpen(left));
+  if (openDifference) return openDifference;
+  if (isOpen(left)) {
+    return Math.abs(numberValue(right.marketValueUsd) || 0) - Math.abs(numberValue(left.marketValueUsd) || 0);
+  }
+  return String(right.cycleClosedAt || "").localeCompare(String(left.cycleClosedAt || ""));
+}
+
+function sortRows(rows) {
+  const accessor = SORT_ACCESSORS[state.sortKey];
+  if (!accessor || !state.sortDirection) return rows.sort(defaultRowCompare);
+
+  return rows.sort((left, right) => {
+    const leftValue = accessor(left);
+    const rightValue = accessor(right);
+    const leftMissing = leftValue === null || leftValue === undefined || leftValue === "";
+    const rightMissing = rightValue === null || rightValue === undefined || rightValue === "";
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    if (leftMissing) return defaultRowCompare(left, right);
+
+    const comparison = typeof leftValue === "number" && typeof rightValue === "number"
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue), "ru", { sensitivity: "base", numeric: true });
+    if (comparison) return state.sortDirection === "descending" ? -comparison : comparison;
+    return defaultRowCompare(left, right);
+  });
+}
+
+function renderSortHeaders() {
+  document.querySelectorAll("button[data-sort]").forEach((button) => {
+    const active = button.dataset.sort === state.sortKey && Boolean(state.sortDirection);
+    const header = button.closest("th");
+    const indicator = button.querySelector(".sort-indicator");
+    header.setAttribute("aria-sort", active ? state.sortDirection : "none");
+    button.classList.toggle("active", active);
+    indicator.textContent = active ? (state.sortDirection === "descending" ? "↓" : "↑") : "↕";
+  });
+}
+
 function filteredRows() {
   const search = byId("searchInput").value.trim().toLowerCase();
   const asset = byId("assetFilter").value;
   const direction = byId("directionFilter").value;
   const currency = byId("currencyFilter").value;
   const profit = byId("profitFilter").value;
-  return [...(state.payload?.rows || [])].filter((row) => {
+  const rows = [...(state.payload?.rows || [])].filter((row) => {
     if (state.activeTab === "open" && !isOpen(row)) return false;
     if (state.activeTab === "closed" && isOpen(row)) return false;
     if (state.activeTab === "review" && row.status !== "REVIEW") return false;
@@ -298,14 +357,8 @@ function filteredRows() {
       if (!haystack.includes(search)) return false;
     }
     return true;
-  }).sort((left, right) => {
-    const openDifference = Number(isOpen(right)) - Number(isOpen(left));
-    if (openDifference) return openDifference;
-    if (isOpen(left)) {
-      return Math.abs(numberValue(right.marketValueUsd) || 0) - Math.abs(numberValue(left.marketValueUsd) || 0);
-    }
-    return String(right.cycleClosedAt || "").localeCompare(String(left.cycleClosedAt || ""));
   });
+  return sortRows(rows);
 }
 
 function statusLabel(row) {
@@ -348,7 +401,7 @@ function detailHtml(row) {
             <div class="detail-item"><span>Биржа</span><strong>${escapeHtml(row.exchange || "—")}</strong></div>
             <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
             <div class="detail-item"><span>История тикеров</span><strong>${escapeHtml((row.symbolHistory || []).join(" → ") || row.symbol)}</strong></div>
-            <div class="detail-item"><span>AVCO-себестоимость открытой позиции</span><strong>${isOpen(row) ? formatMoney(row.openBasis, row.currency) : "—"}</strong><small class="detail-item-help">Средний вход × текущий остаток. В отличие от рыночной стоимости, текущая цена здесь не используется.</small></div>
+            <div class="detail-item"><span>AVCO-себестоимость открытой позиции</span><strong>${isOpen(row) ? formatMoney(row.openBasis, row.currency) : "—"}</strong></div>
             <div class="detail-item"><span>Дивиденды в валюте инструмента</span><strong>${formatMoney(row.dividendsNet, row.currency)}</strong></div>
           </div>
           ${review}
@@ -396,6 +449,7 @@ function rowHtml(row) {
 
 function renderRows() {
   const rows = filteredRows();
+  renderSortHeaders();
   renderKpis(state.payload, rows);
   portfolioBody.innerHTML = rows.map(rowHtml).join("");
   byId("resultCount").textContent = `${rows.length} из ${state.payload?.rows?.length || 0}`;
@@ -492,16 +546,53 @@ byId("forgetDevice").addEventListener("click", async () => {
 
 byId("refreshButton").addEventListener("click", async () => {
   const button = byId("refreshButton");
+  const label = byId("refreshButtonLabel");
+  const feedback = byId("refreshFeedback");
+  const previousGeneratedAt = state.payload?.generatedAt || "";
+  if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.classList.add("is-refreshing");
+  label.textContent = "Обновляем…";
+  feedback.textContent = "Загружаем свежий снимок…";
   try {
     await loadEnvelope();
     const payload = await decryptEnvelope(state.envelope, state.cryptoKey);
     renderDashboard(payload);
+    const changed = Boolean(payload.generatedAt && payload.generatedAt !== previousGeneratedAt);
+    label.textContent = changed ? "Обновлено" : "Актуально";
+    feedback.textContent = changed
+      ? `Обновлено: ${formatDate(payload.generatedAt, true)}`
+      : "Новых данных пока нет";
   } catch (error) {
-    alert(error.message || "Не удалось обновить данные.");
+    label.textContent = "Ошибка";
+    feedback.textContent = error.message || "Не удалось обновить данные.";
   } finally {
     button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.classList.remove("is-refreshing");
+    state.refreshTimer = window.setTimeout(() => {
+      label.textContent = "Обновить";
+      feedback.textContent = "";
+      state.refreshTimer = null;
+    }, 3200);
   }
+});
+
+document.querySelector("thead").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-sort]");
+  if (!button) return;
+  const key = button.dataset.sort;
+  if (state.sortKey !== key) {
+    state.sortKey = key;
+    state.sortDirection = "descending";
+  } else if (state.sortDirection === "descending") {
+    state.sortDirection = "ascending";
+  } else {
+    state.sortKey = null;
+    state.sortDirection = null;
+  }
+  renderRows();
 });
 
 byId("quickTabs").addEventListener("click", (event) => {
