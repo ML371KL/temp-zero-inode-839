@@ -382,9 +382,10 @@ button { color: inherit; }
   box-shadow: var(--shadow-soft);
   overflow: hidden;
 }
-/* `start`, not the default stretch: collapsing one card of the pair would otherwise
-   leave it stretched to the height of its expanded neighbour. */
-.panel-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); align-items: start; gap: 16px; }
+/* Side by side means equal height; only a folded card opts out, or it would be
+   stretched to the height of the expanded one beside it. */
+.panel-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); align-items: stretch; gap: 16px; }
+.panel-row > .panel.is-collapsed { align-self: start; }
 .panel-row > .panel { min-width: 0; }
 .panel-heading {
   display: flex;
@@ -438,9 +439,13 @@ button { color: inherit; }
 /* The badge and the start date ride along on the folded strip: they qualify the
    figure, and a bare number without "к внесённым деньгам" invites the wrong reading. */
 .hero-panel.is-collapsed .hero-sub { margin: 0; }
-.hero-panel.is-collapsed .hero-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; }
-.hero-panel.is-collapsed .eyebrow { margin: 0; }
+/* Centres, not baselines: the strip mixes 11 px small caps, a 22 px figure and a pill,
+   and baseline alignment leaves the caps visibly low against the number. */
+.hero-panel.is-collapsed .hero-main { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; }
+.hero-panel.is-collapsed .eyebrow { margin: 0; letter-spacing: 0.1em; word-spacing: -0.08em; }
 .hero-panel.is-collapsed .hero-figure { font-size: 22px; letter-spacing: -0.02em; }
+.hero-panel.is-collapsed .hero-sub { align-items: center; margin: 0; }
+.hero-panel.is-collapsed .hero-badge { padding-block: 3px; }
 
 .segmented { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface-sunken); }
 .segmented button {
@@ -675,9 +680,13 @@ tbody tr.data-row:hover { background: var(--surface-hover); }
 tbody tr.data-row:hover .expand-chevron { opacity: 1; }
 tbody tr.data-row.expanded { background: var(--surface-hover); }
 tbody tr.data-row.expanded .expand-chevron { opacity: 1; transform: rotate(90deg); }
-.table-wrap th:first-child, .table-wrap td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.table-wrap thead th:first-child,
+.table-wrap tbody tr.data-row td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:first-child, tbody tr.data-row.expanded td:first-child { background: var(--surface-raised); }
-.table-wrap th:first-child { z-index: 3; background: var(--surface-raised); }
+/* Same specificity as the rule above, and later, so the header keeps painting over the
+   pinned first column. Scoping that rule to `thead` raised its specificity, and this one
+   silently stopped applying — rows then scrolled over the column labels. */
+.table-wrap thead th:first-child { z-index: 3; background: var(--surface-raised); }
 /* Which instrument, and what it came to: the two ends of the row are pinned, so on a
    narrower screen the columns that scroll away are the working-out, not the answer. */
 thead th:last-child, tbody tr.data-row td:last-child {
@@ -690,15 +699,19 @@ tbody tr.data-row td:last-child { z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child { background: var(--surface-raised); }
 .table-wrap .numeric { text-align: right; }
 
-.group-row td {
-  position: sticky;
-  top: var(--head-height, 38px);
-  z-index: 1;
+/* One unbroken band, and it does not stick. Pinned under the header it left a
+   hairline gap below it, both headings piled up on each other once two were pinned at
+   the same offset, and the pinned Итого cell of the row beneath painted over its right
+   end. It is a divider; it can scroll with what it divides. */
+.table-wrap .group-row td {
+  position: static;
+  overflow: visible;
   padding: 7px 10px;
+  border-top: 1px solid var(--line-strong);
   border-bottom: 1px solid var(--line-strong);
   background: var(--surface-sunken);
 }
-.table-wrap .group-row .group-cell { z-index: 2; overflow: visible; text-overflow: clip; }
+.group-label { position: sticky; left: 10px; width: max-content; }
 .group-row span { color: var(--ink-2); font: 700 10px var(--sans); text-transform: uppercase; letter-spacing: 0.09em; }
 .group-row b { margin-left: 8px; color: var(--ink-3); font: 600 11px var(--mono); }
 
@@ -870,7 +883,7 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 
   /* Only the instrument stays pinned. With the total pinned as well there was almost
      no room left between them, and the columns in the middle became unreachable. */
-  .table-wrap thead th:last-child,
+  .table-wrap thead th:last-child { right: auto; border-left: 0; }
   .table-wrap tbody tr.data-row td:last-child { position: static; border-left: 0; }
   .table-wrap table { min-width: 1290px; }
   .table-wrap th, .table-wrap td { padding-inline: 7px; }

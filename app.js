@@ -16,7 +16,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260726-3";
+} from "./charts.js?v=20260727-1";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -826,39 +826,22 @@ function realisedTimeline(payload) {
     years.set(year, (years.get(year) || 0) + amount);
   }
 
-  // The same curve read as a ratio: money earned per dollar that was in the account
-  // by that date. It needs dated funding, which older snapshots do not carry, so the
-  // percent view is offered only when the flows are actually there.
+  /*
+   * The percent view is the same curve against one fixed base: everything the account
+   * was ever given, net of what was taken out.
+   *
+   * Dividing by the money contributed *by that date* was tried first and is what a
+   * money-weighted return would do, but it puts a small denominator under the earliest
+   * months: a few hundred dollars of result on the first deposit is a double-digit
+   * percentage, so the ratio opened with a spike the dollars did not have and the two
+   * modes disagreed about the shape of the same history. One base keeps the shape
+   * identical and leaves the axis the only thing that changes.
+   */
   const flows = (payload.cashFlows || [])
     .map((flow) => ({ time: timeValue(flow.timestamp), amount: numberValue(flow.amountUsd) || 0 }))
-    .filter((flow) => flow.time !== null)
-    .sort((left, right) => left.time - right.time);
-  for (const point of points) {
-    const month = new Date(point.time);
-    const monthEnd = Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 1);
-    let contributed = 0;
-    for (const flow of flows) {
-      if (flow.time >= monthEnd) break;
-      contributed += flow.amount;
-    }
-    point.contributed = contributed;
-    point.percent = contributed > 0 ? point.value / contributed : null;
-  }
-
-  // The yearly columns in percent: the year's own result against the money that was
-  // in the account by the end of it. Deliberately not the change in the cumulative
-  // ratio, which can fall in a profitable year simply because a deposit grew the
-  // denominator — a bar whose sign disagrees with the money it represents is a lie
-  // in the only place the reader is looking.
-  const contributedByYearEnd = (year) => {
-    const boundary = Date.UTC(year + 1, 0, 1);
-    let contributed = 0;
-    for (const flow of flows) {
-      if (flow.time >= boundary) break;
-      contributed += flow.amount;
-    }
-    return contributed;
-  };
+    .filter((flow) => flow.time !== null);
+  const contributed = flows.reduce((sum, flow) => sum + flow.amount, 0);
+  const share = (value) => (contributed > 0 ? value / contributed : null);
 
   const totals = payload.totals || {};
   const expected = (numberValue(totals.realizedPnlUsd) || 0)
@@ -867,15 +850,15 @@ function realisedTimeline(payload) {
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
   return {
     points,
-    percentPoints: points
-      .filter((point) => point.percent !== null)
-      .map((point) => ({ time: point.time, value: point.percent, delta: point.delta })),
-    percentAvailable: flows.length > 0 && points.some((point) => point.percent !== null),
+    percentPoints: contributed > 0
+      ? points.map((point) => ({ time: point.time, value: share(point.value), delta: share(point.delta) }))
+      : [],
+    percentAvailable: contributed > 0 && points.length >= 2,
+    percentBase: contributed > 0 ? contributed : null,
     years: yearList.map(([year, value]) => ({ label: String(year), value })),
-    percentYears: yearList
-      .map(([year, value]) => ({ label: String(year), value, base: contributedByYearEnd(year) }))
-      .filter((item) => item.base > 0)
-      .map((item) => ({ label: item.label, value: item.value / item.base })),
+    percentYears: contributed > 0
+      ? yearList.map(([year, value]) => ({ label: String(year), value: share(value) }))
+      : [],
     dated,
     undated,
     expected,
@@ -1002,12 +985,25 @@ function visibleHost(id) {
   return host.getBoundingClientRect().width > 0 ? host : null;
 }
 
+// Percent labels keep one decimal whether or not the value has one: a column reading
+// "+20 %" next to "+5,7 %" looks like a different measure, not a rounder number.
+const fixedPercentFormatter = new Intl.NumberFormat("ru-RU", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+function percentLabel(value, { signed = false } = {}) {
+  if (!Number.isFinite(value)) return "—";
+  const sign = signed && value > 0 ? "+" : "";
+  return `${sign}${fixedPercentFormatter.format(value * 100)} %`;
+}
+
 /** The subtitle has to say what the percentages are a percentage of. */
 function updateTimelineNote() {
-  const percent = state.timelineMode === "percent"
-    && state.charts.get("timeline")?.percentAvailable;
+  const timeline = state.charts.get("timeline");
+  const percent = state.timelineMode === "percent" && timeline?.percentAvailable;
   byId("timelineNote").textContent = percent
-    ? "Накопленный результат к внесённым деньгам на ту же дату; столбцы — результат года к внесённому на конец года."
+    ? `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`
     : (state.timelineCoverage || "");
 }
 
@@ -1058,8 +1054,8 @@ function renderCharts() {
     const yearHost = visibleHost("yearChart");
     const years = percent ? timeline.percentYears : timeline.years;
     if (yearHost) yearHost.innerHTML = columnChart(years, hostWidth(yearHost), {
-      label: percent ? "Результат года к внесённым деньгам" : "Результат по годам",
-      format: percent ? (value) => `${value > 0 ? "+" : ""}${sharePercent(value)}` : undefined,
+      label: percent ? "Результат года в процентах от внесённого" : "Результат по годам",
+      format: percent ? (value) => percentLabel(value, { signed: true }) : undefined,
     });
   }
 
@@ -1105,8 +1101,8 @@ function prepareCharts(payload) {
   const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
   percentButton.disabled = !timeline.percentAvailable;
   percentButton.title = timeline.percentAvailable
-    ? "Реализованный результат к внесённым деньгам на ту же дату"
-    : "Недоступно: в снимке нет датированных внесений (Deposits/Withdrawals)";
+    ? "Тот же результат в процентах от внесённых денег"
+    : "Недоступно: в снимке нет внесений (Deposits/Withdrawals)";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
@@ -1176,6 +1172,11 @@ function showTooltip(target, event) {
 }
 
 document.addEventListener("mousemove", (event) => {
+  // The cumulative chart has no per-point marks to carry `data-tip-title`; it resolves
+  // the nearest point itself in its own listener. That listener runs first as the event
+  // bubbles, so without this guard the generic one would immediately hide the tooltip
+  // it had just filled in, and the crosshair would follow the line with nothing to read.
+  if (event.target.closest?.("#timelineChart")) return;
   const target = event.target.closest?.("[data-tip-title]");
   if (!target) {
     tooltip.hidden = true;
@@ -1222,9 +1223,13 @@ byId("timelineChart").addEventListener("mousemove", (event) => {
     dataset: {
       tipTitle: `${monthLabel(month)}`,
       tipValue: series.percent
-        ? `${sharePercent(nearest.value)} к внесённым деньгам`
+        ? `${percentLabel(nearest.value, { signed: true })} от внесённого`
         : `Накоплено ${formatUsd(nearest.value)}`,
-      tipNote: nearest.delta ? `за месяц ${formatSignedUsd(nearest.delta)}` : "",
+      tipNote: nearest.delta
+        ? `за месяц ${series.percent
+          ? percentLabel(nearest.delta, { signed: true })
+          : formatSignedUsd(nearest.delta)}`
+        : "",
     },
   }, event);
 });
@@ -1272,7 +1277,7 @@ function renderAccountPanel(payload) {
   const notCounted = [
     ["Проценты брокера", accountCash.interestUsd],
     ["Сборы по счёту", accountCash.accountFeesUsd],
-    ["Результат валютных конверсий", accountCash.currencyResultUsd],
+    ["Результат FX-конверсий", accountCash.currencyResultUsd],
     ["Прочий кэш", accountCash.otherCashUsd],
     ["Неклассифицированный кэш", accountCash.unclassifiedCashUsd],
   ].filter(([, value]) => numberValue(value) !== null && numberValue(value) !== 0);
@@ -1727,10 +1732,11 @@ const GROUP_LABELS = {
 };
 
 function groupRow(kind, count) {
-  // The label lives in the first cell, which is the one pinned to the left edge, and
-  // is allowed to overflow into the empty cell beside it. In a single cell spanning
-  // the whole row it scrolled away and left an unexplained empty band.
-  return `<tr class="group-row"><td class="group-cell"><span>${GROUP_LABELS[kind]}</span><b>${count}</b></td><td colspan="12"></td></tr>`;
+  // A single cell, so the band is one unbroken colour: split across the pinned first
+  // column and the rest, the label sat on the row background and the divider on the
+  // group one, and the seam moved as the table scrolled. The label is pinned inside
+  // the cell instead — a cell spanning the whole row has nowhere to slide to.
+  return `<tr class="group-row"><td colspan="13"><div class="group-label"><span>${GROUP_LABELS[kind]}</span><b>${count}</b></div></td></tr>`;
 }
 
 function renderRows() {
@@ -1766,20 +1772,15 @@ function renderRows() {
 }
 
 /**
- * The group headings stick under the column header, and the column header is not a
- * fixed height: its labels wrap differently with the viewport, and a hard-coded
- * offset leaves the heading half-hidden behind it. Measure it and publish the number
- * as a custom property — CSSOM, which the page's CSP allows, unlike a style attribute.
+ * The expanded card is pinned to the scrollport and has to be exactly as wide as it,
+ * which no CSS length can express: the cell it lives in is as wide as the table.
+ * Published as a custom property through CSSOM, which the page's CSP allows where a
+ * style attribute would be dropped.
  */
 function syncStickyOffsets() {
-  const head = document.querySelector(".table-wrap thead");
   const wrap = document.querySelector(".table-wrap");
-  if (!head || !wrap) return;
-  const height = Math.round(head.getBoundingClientRect().height);
-  if (height > 0) wrap.style.setProperty("--head-height", `${height}px`);
-  // The expanded card is pinned to the scrollport and has to be exactly as wide as
-  // it, which no CSS length can express: the cell it lives in is table-width.
-  if (wrap.clientWidth > 0) wrap.style.setProperty("--wrap-width", `${wrap.clientWidth}px`);
+  if (!wrap || wrap.clientWidth <= 0) return;
+  wrap.style.setProperty("--wrap-width", `${wrap.clientWidth}px`);
 }
 
 function toggleRow(conid) {
