@@ -392,7 +392,7 @@ button { color: inherit; }
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 16px 20px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--line);
 }
 .panel-heading h2 { margin: 0; font-size: 15px; letter-spacing: -0.01em; }
@@ -452,6 +452,12 @@ button { color: inherit; }
 .hero-panel.is-collapsed .eyebrow { margin: 0; letter-spacing: 0.1em; word-spacing: -0.08em; }
 .hero-panel.is-collapsed .hero-figure { position: relative; top: -0.14em; font-size: 22px; letter-spacing: -0.02em; }
 .hero-panel.is-collapsed .hero-sub { display: contents; }
+/* One pixel, which splits the difference between the two anchors that disagree here:
+   measured by capital height these sit half a pixel high, measured by the leading "+"
+   they sit half a pixel low. Either error alone is invisible; the 1.5 px that lands one
+   of them dead-on puts the other visibly out. */
+.hero-panel.is-collapsed .hero-badge,
+.hero-panel.is-collapsed .hero-note { position: relative; top: -0.083em; }
 .hero-panel.is-collapsed .hero-collapse { top: 50%; transform: translateY(-50%); }
 .hero-panel.is-collapsed .hero-badge { padding-block: 3px; }
 
@@ -704,12 +710,15 @@ tbody tr.data-row:hover td:first-child, tbody tr.data-row.expanded td:first-chil
 .table-wrap thead th:first-child { z-index: 3; background: var(--surface-raised); }
 /* Which instrument, and what it came to: the two ends of the row are pinned, so on a
    narrower screen the columns that scroll away are the working-out, not the answer. */
-thead th:last-child, tbody tr.data-row td:last-child {
+/* Scoped, like every other cell rule here. Unscoped, these two reached the buildup
+   table as well: its right-hand header cell picked up the raised background and a left
+   border, so half of that header looked like a different band. */
+.table-wrap thead th:last-child, .table-wrap tbody tr.data-row td:last-child {
   position: sticky;
   right: 0;
   border-left: 1px solid var(--line);
 }
-thead th:last-child { z-index: 3; background: var(--surface-raised); }
+.table-wrap thead th:last-child { z-index: 3; background: var(--surface-raised); }
 tbody tr.data-row td:last-child { z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child { background: var(--surface-raised); }
 .table-wrap .numeric { text-align: right; }
