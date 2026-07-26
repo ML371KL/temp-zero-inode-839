@@ -621,7 +621,7 @@ button { color: inherit; }
 /* ================================================================= portfolio */
 
 .search-wrap { width: min(224px, 26vw); display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 12px; background: var(--surface-sunken); color: var(--ink-3); }
-.search-wrap input { width: 100%; min-height: 30px; border: 0; outline: 0; padding: 4px 0; color: var(--ink); background: transparent; font-size: 16px; }
+.search-wrap input { width: 100%; min-height: 30px; border: 0; outline: 0; padding: 4px 0; color: var(--ink); background: transparent; font-size: 13px; }
 .search-wrap input::placeholder { color: var(--ink-3); }
 
 .filter-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
@@ -632,7 +632,18 @@ button { color: inherit; }
 .quick-tabs button:hover { color: var(--ink); }
 .quick-tabs button.active { color: var(--ink); background: var(--surface); box-shadow: var(--shadow-soft); }
 .select-filters { display: flex; gap: 7px; align-items: center; }
-select { min-height: 32px; max-width: 132px; border: 1px solid var(--line); border-radius: 8px; outline: 0; padding: 4px 22px 4px 9px; color: var(--ink-2); background: var(--surface-raised); font-size: 13px; }
+select, .scope-filter > summary {
+  min-height: 32px; border: 1px solid var(--line); border-radius: 8px; outline: 0;
+  padding: 4px 24px 4px 9px; color: var(--ink-2); background: var(--surface-raised);
+  font: inherit; font-size: 13px; white-space: nowrap;
+  /* The chevron is painted here rather than left to the platform: a <details> cannot
+     borrow a <select>'s native arrow, so both draw the same one instead. */
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23808c99' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+select { max-width: 132px; }
 
 .kpi-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 16px 20px 0; }
 .kpi-heading span { color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; }
@@ -898,7 +909,9 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   .panel-body { padding: 16px; }
   /* The desktop row is compact; a finger still needs 40 px, so the phone keeps it. */
   .search-wrap { width: 100%; }
-  .search-wrap input { min-height: 44px; padding-block: 10px; }
+  /* Back to 16 px on a phone: anything smaller makes iOS Safari zoom the page in
+     when the field takes focus, and it never zooms back out. */
+  .search-wrap input { min-height: 44px; padding-block: 10px; font-size: 16px; }
   select { min-height: 40px; padding-block: 7px; }
   .quick-tabs { padding: 3px; }
   .quick-tabs button { min-height: 40px; padding-block: 7px; }
@@ -956,24 +969,19 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
    and the escape-to-close all come from the element, and nothing here needs an
    inline style, which the page's CSP forbids. */
 .scope-filter { position: relative; }
-.scope-filter > summary {
-  display: flex; align-items: center; gap: 6px; min-height: 32px; max-width: 172px;
-  padding: 4px 9px; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--surface-raised); color: var(--ink-2); font-size: 13px;
-  white-space: nowrap; cursor: pointer; list-style: none;
-}
+/* The label is its own element so it can be clipped: `text-overflow` does nothing to
+   the anonymous box a flex container wraps bare text in, and the class names ran
+   straight under the chevron. */
+.scope-filter > summary { display: flex; align-items: center; max-width: 188px; cursor: pointer; list-style: none; }
+.scope-filter > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scope-filter > summary::-webkit-details-marker { display: none; }
-.scope-filter > summary::after {
-  content: "▾"; margin-left: auto; color: var(--ink-3); font-size: 11px;
-}
 .scope-filter[open] > summary { border-color: var(--accent); color: var(--ink-1); }
 .scope-filter > summary.is-narrowed { border-color: var(--accent); color: var(--ink-1); }
 .scope-menu {
-  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 232px;
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 178px;
   padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface-raised); box-shadow: 0 12px 30px rgb(0 0 0 / 28%);
 }
-.scope-note { margin: 0 0 9px; color: var(--ink-3); font-size: 11px; line-height: 1.35; }
 .scope-options { display: grid; gap: 2px; margin-bottom: 9px; }
 .scope-option {
   display: flex; align-items: center; gap: 8px; padding: 5px 6px;
@@ -981,7 +989,6 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 }
 .scope-option:hover { background: var(--surface-sunken); }
 .scope-option input { margin: 0; }
-.scope-option b { margin-left: auto; color: var(--ink-3); font: 400 11px/1 var(--mono); }
 .scope-filter .ghost-button { width: 100%; }
 
 @media (max-width: 760px) {

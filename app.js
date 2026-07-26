@@ -464,10 +464,10 @@ function formatCost(value) {
   return formatUsd(-parsed || 0);
 }
 
-function formatPercent(value, digits = 2) {
+function formatPercent(value, digits = 2, minimumDigits = 0) {
   const parsed = numberValue(value);
   if (parsed === null) return "—";
-  return `${numberFormatter(digits).format(parsed * 100)} %`;
+  return `${numberFormatter(digits, minimumDigits).format(parsed * 100)} %`;
 }
 
 const dateFormatters = new Map();
@@ -827,29 +827,20 @@ function renderHero(payload) {
   const missingHint = payload.accountIdentity
     ? "нет событий Deposits/Withdrawals в Activity Flex"
     : "нет в этом снимке — нужна свежая синхронизация";
-  const facts = scope.narrowed
-    ? [
-      ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
-        "база процента: деньги вносились на счёт целиком, а не в отдельный класс"],
-      ["Стоимость этих позиций", formatUsd(scope.marketValue), "",
-        scope.openCount ? "" : "в этом срезе нет открытых позиций"],
-      ["Годовая доходность, XIRR", formatPercent(scope.moneyWeighted),
-        pnlClass(scope.moneyWeighted),
-        scope.moneyWeighted === null
-          ? "по этому срезу доходность не считается: нет и вложений, и возвратов"
-          : "по собственным денежным потокам этих инструментов"],
-      ["Инструментов в срезе", `${openCount} откр. из ${scope.rows.length}`, "", ""],
-    ]
-    : [
-      ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
-        contributions === null ? missingHint : ""],
-      ["Сейчас на счёте", formatUsd(netAssetValue), "",
-        netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
-      ["Годовая доходность, XIRR", formatPercent(performance.moneyWeightedReturn),
-        pnlClass(performance.moneyWeightedReturn),
-        numberValue(performance.moneyWeightedReturn) === null ? missingHint : ""],
-      ["Открытых позиций", `${openCount} из ${rows.length}`, "", ""],
-    ];
+  // Narrowing changes two values and nothing else. The row keeps its four cards, its
+  // labels and its one-line shape: an explanation added under one card and not the
+  // others knocks the row out of line, and the plate beside it already says what the
+  // page is showing.
+  const returnRate = scope.narrowed ? scope.moneyWeighted : performance.moneyWeightedReturn;
+  const facts = [
+    ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
+      contributions === null ? missingHint : ""],
+    ["Сейчас на счёте", formatUsd(netAssetValue), "",
+      netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
+    ["Годовая доходность, XIRR", formatPercent(returnRate), pnlClass(returnRate),
+      numberValue(returnRate) === null && !scope.narrowed ? missingHint : ""],
+    ["Открытых позиций", `${openCount} из ${scope.narrowed ? scope.rows.length : rows.length}`, "", ""],
+  ];
 
   byId("heroPanel").innerHTML = `
     <button class="collapse-toggle hero-collapse" type="button" data-collapse-for="hero"
@@ -860,7 +851,7 @@ function renderHero(payload) {
         : "Заработано за всё время"}</p>
       <p class="hero-figure ${pnlClass(headline)}">${formatSignedUsd(headline)}</p>
       <p class="hero-sub">
-        ${returnOnMoney === null ? "" : `<span class="hero-badge ${pnlClass(returnOnMoney)}">${escapeHtml(returnOnMoney > 0 ? "+" : "")}${formatPercent(returnOnMoney, 1)} к внесённым деньгам</span>`}
+        ${returnOnMoney === null ? "" : `<span class="hero-badge ${pnlClass(returnOnMoney)}">${escapeHtml(returnOnMoney > 0 ? "+" : "")}${formatPercent(returnOnMoney, 1, 1)} к внесённым деньгам</span>`}
         ${performance.firstFundingAt ? `<span class="hero-note">с ${formatDate(performance.firstFundingAt)}</span>` : ""}
       </p>
       <div class="hero-facts">
@@ -1679,32 +1670,19 @@ function renderFilterOptions(rows) {
   renderScopeFilter();
 }
 
-/**
- * The class list, with how many instruments and how much result each one carries, so
- * the choice is made against the number it will change rather than blind.
- */
+/** The classes present in the payload, as a plain multiple choice. */
 function renderScopeFilter() {
-  const rows = state.payload?.rows || [];
   const universe = scopeUniverse();
-  const stats = new Map(universe.map((value) => [value, { count: 0, result: 0 }]));
-  for (const row of rows) {
-    const entry = stats.get(String(row.assetClass || "—"));
-    if (!entry) continue;
-    entry.count += 1;
-    entry.result += numberValue(row.totalResultUsd) || 0;
-  }
   byId("assetScopeOptions").innerHTML = universe.map((value) => {
-    const entry = stats.get(value);
     const checked = !state.assetScope.size || state.assetScope.has(value);
     return `<label class="scope-option">
       <input type="checkbox" value="${escapeHtml(value)}"${checked ? " checked" : ""} />
       <span>${escapeHtml(ASSET_CLASS_LABELS[value] || value)}</span>
-      <b>${entry.count} · ${compactUsdFixed(entry.result)}</b>
     </label>`;
   }).join("");
-  const summary = byId("assetScopeSummary");
-  summary.textContent = scopeLabel();
-  summary.classList.toggle("is-narrowed", scopeNarrowed());
+  const label = byId("assetScopeSummary");
+  label.textContent = scopeLabel();
+  label.closest("summary").classList.toggle("is-narrowed", scopeNarrowed());
   byId("assetScopeAll").hidden = !scopeNarrowed();
 }
 
@@ -2452,6 +2430,20 @@ byId("searchInput").addEventListener("input", () => {
 });
 
 byId("assetScopeOptions").addEventListener("change", applyScope);
+
+// <details> only closes on its own summary. A filter that stays open until you find
+// that summary again behaves unlike every other control in the row.
+document.addEventListener("click", (event) => {
+  const scope = byId("assetScope");
+  if (scope.open && !scope.contains(event.target)) scope.open = false;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const scope = byId("assetScope");
+  if (!scope.open) return;
+  scope.open = false;
+  scope.querySelector("summary").focus();
+});
 byId("assetScopeAll").addEventListener("click", () => {
   state.assetScope = new Set();
   persistScope();
