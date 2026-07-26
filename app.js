@@ -16,7 +16,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260727-1";
+} from "./charts.js?v=20260727-2";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -1656,7 +1656,7 @@ function detailHtml(row) {
             ${optional("Прочие сборы",
               `<span class="${pnlClass(row.otherFeesUsd)}">${formatUsd(row.otherFeesUsd)}</span>`,
               numberValue(row.otherFeesUsd))}
-            ${optional("Из них валютный результат",
+            ${optional(`<span title="${escapeHtml("Реализованный P&L складывается из ценовой и валютной частей: валютная — это движение курса между покупкой и продажей")}">Валютная часть реализованного P&amp;L</span>`,
               `<span class="${pnlClass(row.fxRealizedPnlUsd)}">${formatUsd(row.fxRealizedPnlUsd)}</span>`,
               numberValue(row.fxRealizedPnlUsd))}
           </div>

@@ -355,7 +355,7 @@ button { color: inherit; }
 .hero-facts strong { display: block; margin-top: 5px; font: 600 15px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .hero-facts small { display: block; margin-top: 4px; color: var(--ink-3); font-size: 10.5px; line-height: 1.35; }
 
-.hero-side { display: grid; align-content: start; gap: 12px; min-width: 0; }
+.hero-side { display: flex; flex-direction: column; justify-content: space-between; gap: 12px; min-width: 0; }
 .hero-meter { min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .hero-meter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .hero-meter-head span { color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -441,10 +441,12 @@ button { color: inherit; }
 .hero-panel.is-collapsed .hero-sub { margin: 0; }
 /* Centres, not baselines: the strip mixes 11 px small caps, a 22 px figure and a pill,
    and baseline alignment leaves the caps visibly low against the number. */
-.hero-panel.is-collapsed .hero-main { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; }
+.hero-panel.is-collapsed .hero-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; }
 .hero-panel.is-collapsed .eyebrow { margin: 0; letter-spacing: 0.1em; word-spacing: -0.08em; }
 .hero-panel.is-collapsed .hero-figure { font-size: 22px; letter-spacing: -0.02em; }
-.hero-panel.is-collapsed .hero-sub { align-items: center; margin: 0; }
+.hero-panel.is-collapsed .hero-sub { display: contents; }
+.hero-panel.is-collapsed .hero-badge { align-self: center; }
+.hero-panel.is-collapsed .hero-collapse { top: 50%; transform: translateY(-50%); }
 .hero-panel.is-collapsed .hero-badge { padding-block: 3px; }
 
 .segmented { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface-sunken); }
@@ -740,7 +742,12 @@ tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child 
 .positive { color: var(--positive); }
 .negative { color: var(--negative); }
 .muted-value { color: var(--ink-3); }
-td.is-total { font-weight: 700; }
+/* `.table-wrap td` sets the cell colour and outranks a bare class, so the sign colours
+   have to be stated at the same level or the money columns come out plain ink. */
+.table-wrap td.positive, .table-wrap td .positive { color: var(--positive); }
+.table-wrap td.negative, .table-wrap td .negative { color: var(--negative); }
+.table-wrap td.muted-value, .table-wrap td .muted-value { color: var(--ink-3); }
+.table-wrap td.is-total { font-weight: 700; }
 .cell-bar { display: block; margin-top: 4px; opacity: 0.5; }
 .cell-bar rect { fill: var(--ink-3); }
 .cell-bar.tone-up rect { fill: var(--mark-positive); }
