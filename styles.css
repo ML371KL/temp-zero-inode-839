@@ -972,7 +972,11 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 /* The label is its own element so it can be clipped: `text-overflow` does nothing to
    the anonymous box a flex container wraps bare text in, and the class names ran
    straight under the chevron. */
-.scope-filter > summary { display: flex; align-items: center; max-width: 188px; cursor: pointer; list-style: none; }
+/* A fixed width, not a maximum. The whole filter group is pushed against the right
+   edge, so anything that changes width in it drags every control beside it sideways —
+   which is what the reset button used to do by appearing, and what the class list
+   would do again every time the selection changed the label. */
+.scope-filter > summary { display: flex; align-items: center; width: 188px; cursor: pointer; list-style: none; }
 .scope-filter > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scope-filter > summary::-webkit-details-marker { display: none; }
 .scope-filter[open] > summary { border-color: var(--accent); color: var(--ink-1); }
@@ -995,4 +999,7 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   /* The row scrolls sideways on a phone, and an absolutely positioned menu inside a
      scroll container is clipped by it. Here the menu opens in the flow instead. */
   .scope-menu { position: static; min-width: 0; margin-top: 6px; box-shadow: none; }
+  /* The row is a horizontal scroller here, so nothing shifts and the label can size
+     itself instead of holding a desktop-width slot. */
+  .scope-filter > summary { width: auto; max-width: 188px; }
 }

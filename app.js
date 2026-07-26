@@ -126,41 +126,57 @@ function scopeLabel() {
 }
 
 /**
- * Money-weighted return of a set of instruments, from their own cash flows.
+ * Money-weighted return of the account with the excluded classes carved out of it.
  *
- * Buying is money out, selling and dividends are money in, and whatever is still
- * open is money that would come in today. `cashUsd` is used rather than price times
- * quantity because only it is converted, and at the rate of its own execution.
+ * Not the return of the chosen instruments on their own. Interest, account fees and
+ * currency conversions are the account's, not any class's, and they kept accruing
+ * whichever classes are ticked — so the question the card answers is "what did this
+ * account do without those instruments", and the answer has to be an account figure.
  *
- * Dividends are dated by payment, not by ex-date: this asks when the cash moved, and
- * the cumulative chart asks which position earned it. The two dates disagree by
- * weeks and each block uses the one its own question needs.
+ * The excluded instruments are treated as somewhere else the money went: cash they
+ * consumed is a withdrawal from what remains, cash they returned is a deposit, and
+ * whatever of them is still open is taken out of the closing value. That is also
+ * literally true here — the futures were one leg of an arbitrage settled at another
+ * broker. With nothing excluded the flows reduce to contributions and closing value,
+ * which is the account's own money-weighted return, and it comes back identical.
+ *
+ * `cashUsd` is used rather than price times quantity because only it is converted,
+ * and at the rate of its own execution. Dividends are dated by payment, not ex-date:
+ * this asks when the cash moved; the cumulative chart asks which position earned it.
  */
-function scopeFlows(rows, asOf) {
+function carveOutFlows(payload, excluded, asOf) {
   const flows = [];
-  let terminal = 0;
-  let terminalKnown = true;
-  for (const row of rows) {
+  let known = true;
+  for (const flow of payload.cashFlows || []) {
+    const amount = numberValue(flow.amountUsd);
+    const time = timeValue(flow.timestamp);
+    // A contribution is money put in, which is a negative flow to the holder.
+    if (amount && time !== null) flows.push({ time, amount: -amount });
+  }
+  let excludedValue = 0;
+  for (const row of excluded) {
     for (const cycle of row.cycles || []) {
       for (const trade of cycle.trades || []) {
         const amount = numberValue(trade.cashUsd);
         const time = timeValue(trade.timestamp);
-        if (amount && time !== null) flows.push({ time, amount });
+        if (amount && time !== null) flows.push({ time, amount: -amount });
       }
       for (const event of cycle.cashEvents || []) {
         const amount = numberValue(event.amountUsd);
         const time = timeValue(event.timestamp);
-        if (amount && time !== null) flows.push({ time, amount });
+        if (amount && time !== null) flows.push({ time, amount: -amount });
       }
     }
     if (isOpen(row)) {
       const value = numberValue(row.marketValueUsd);
-      if (value === null) terminalKnown = false;
-      else terminal += value;
+      if (value === null) known = false;
+      else excludedValue += value;
     }
   }
-  if (asOf !== null && terminal) flows.push({ time: asOf, amount: terminal });
-  return { flows, terminalKnown };
+  const netAssetValue = numberValue(payload.accountIdentity?.netAssetValueUsd);
+  if (netAssetValue === null || asOf === null) return { flows, known: false };
+  flows.push({ time: asOf, amount: netAssetValue - excludedValue });
+  return { flows, known };
 }
 
 /** Bisection, matching the pipeline: it cannot diverge, and a basis point is enough. */
@@ -202,22 +218,34 @@ let scopeCache = null;
 function scopeSummary(payload) {
   const key = `${payload.generatedAt}|${[...state.assetScope].sort().join(",")}`;
   if (scopeCache && scopeCache.key === key) return scopeCache.value;
-  const rows = scopedRows();
-  const sum = (key) => rows.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
+  const all = payload.rows || [];
+  const rows = all.filter(inScope);
+  const excluded = all.filter((row) => !inScope(row));
+  const sum = (field) => rows.reduce((total, row) => total + (numberValue(row[field]) || 0), 0);
+  const instrumentResult = sum("totalResultUsd");
+  const droppedResult = excluded.reduce(
+    (total, row) => total + (numberValue(row.totalResultUsd) || 0), 0);
+
+  // The headline is the account result less what was excluded, not the sum of what
+  // was kept: broker interest was earned, account fees were paid and currencies were
+  // converted no matter which classes are ticked, and dropping them would understate
+  // the account by nearly twenty thousand dollars.
+  const accountResult = numberValue(payload.accountIdentity?.accountResultUsd);
   const asOf = timeValue(payload.generatedAt);
-  const { flows, terminalKnown } = scopeFlows(rows, asOf);
+  const { flows, known } = carveOutFlows(payload, excluded, asOf);
   const value = {
     rows,
+    excluded,
     narrowed: scopeNarrowed(),
     label: scopeLabel(),
-    result: sum("totalResultUsd"),
+    instrumentResult,
+    result: accountResult === null ? instrumentResult : accountResult - droppedResult,
     realized: sum("realizedPnlUsd"),
     unrealized: sum("unrealizedPnlUsd"),
     dividends: sum("dividendsNetUsd"),
     fees: sum("otherFeesUsd"),
-    marketValue: sum("marketValueUsd"),
     openCount: rows.filter(isOpen).length,
-    moneyWeighted: terminalKnown ? xirr(flows) : null,
+    moneyWeighted: known ? xirr(flows) : null,
   };
   scopeCache = { key, value };
   return value;
@@ -878,14 +906,6 @@ function renderHero(payload) {
           `).join("")}
         </div>
       </div>` : ""}
-      ${scope.narrowed ? `
-      <div class="hero-check tone-info">
-        <span class="hero-check-dot" aria-hidden="true"></span>
-        <span>
-          <strong>Показан срез: ${escapeHtml(scope.label)}</strong>
-          <small>только результат инструментов — проценты брокера, сборы по счёту и валютные конверсии в него не входят</small>
-        </span>
-      </div>` : `
       <div class="hero-check tone-${tone}">
         <span class="hero-check-dot" aria-hidden="true"></span>
         <span>
@@ -894,7 +914,7 @@ function renderHero(payload) {
             ? escapeHtml(IDENTITY_HINTS[identityStatus] || "сверка со счётом недоступна")
             : `расхождение ${formatUsd(identity.differenceUsd)} при допуске ${formatUsd(identity.toleranceUsd)}`}</small>
         </span>
-      </div>`}
+      </div>
     </div>
   `;
   state.charts.set("meter", { segments: meterSegments });
@@ -908,7 +928,9 @@ function renderHero(payload) {
  */
 function buildupItems(payload) {
   const scope = scopeSummary(payload);
-  const accountCash = scope.narrowed ? {} : (payload.accountCash || {});
+  // Account-level components stay whatever the filter is: interest accrued, fees were
+  // charged and currencies were converted regardless of which classes are ticked.
+  const accountCash = payload.accountCash || {};
   // Narrowed, every component is re-summed over the chosen rows. Reading them from
   // `totals` would print account-wide numbers under a heading that promises a subset.
   const totals = scope.narrowed
@@ -954,9 +976,11 @@ function buildupItems(payload) {
     items.push({ label: "Сборы по инструментам", value: instrumentFees, note: "" });
   }
   items.push({
-    label: scope.narrowed ? `Итог · ${scope.label}` : "Итог по инструментам",
+    label: "Итог по инструментам",
     kind: "total",
-    note: scope.narrowed ? "сумма строк выбранных классов" : "сумма всех строк таблицы",
+    note: scope.narrowed
+      ? `сумма строк выбранных классов: ${scope.label}`
+      : "сумма всех строк таблицы",
   });
 
   const extras = [
@@ -2052,7 +2076,9 @@ function renderRows() {
   portfolioBody.innerHTML = markup.join("");
   byId("resultCount").textContent = `${rows.length} из ${state.payload?.rows?.length || 0}`;
   byId("emptyState").hidden = rows.length > 0;
-  byId("resetFilters").hidden = activeFilterCount() === 0;
+  // Disabled rather than hidden: appearing and disappearing shifted the whole row
+  // sideways every time a filter was touched.
+  byId("resetFilters").disabled = activeFilterCount() === 0;
   syncStickyOffsets();
 }
 
