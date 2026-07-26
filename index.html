@@ -12,7 +12,7 @@
     <!-- Inline so there is no extra request and no 404 on every load. `img-src` already
          allows data: URIs, so this needs no change to the Content-Security-Policy. -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230f1d2b'/%3E%3Cpath d='M4 17 L9 11 L13 14 L20 6' fill='none' stroke='%2383e0c1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="styles.css?v=20260727-3" />
+    <link rel="stylesheet" href="styles.css?v=20260727-4" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -173,7 +173,7 @@
             </div>
             <div class="search-wrap">
               <span aria-hidden="true">⌕</span>
-              <input id="searchInput" type="search" placeholder="Тикер, компания, Conid…" />
+              <input id="searchInput" type="search" placeholder="Поиск" aria-label="Поиск по тикеру, компании или Conid" title="Тикер, компания или Conid" />
             </div>
           </div>
 
@@ -191,7 +191,7 @@
               </select>
               <select id="currencyFilter" aria-label="Валюта"><option value="">Все валюты</option></select>
               <select id="profitFilter" aria-label="Результат">
-                <option value="">Любой результат</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
+                <option value="">Любой итог</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
               </select>
               <button id="resetFilters" class="ghost-button" type="button" hidden>Сбросить</button>
             </div>
@@ -222,7 +222,7 @@
                   <th aria-sort="none"><button class="sort-button" type="button" data-sort="cycle">Цикл <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                   <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="quantity">Количество <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                   <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageEntry">Средний вход, AVCO <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
-                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageExit">Средний выход (закр.) <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageExit" title="Средняя цена выхода — только у закрытой позиции">Средний выход <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                   <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="currentPrice">Текущая цена <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                   <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="marketValueUsd">Стоимость, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
                   <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="unrealizedPnlUsd">Нереализ., USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
@@ -260,6 +260,6 @@
 
     <div id="chartTooltip" class="chart-tooltip" role="tooltip" hidden></div>
 
-    <script type="module" src="app.js?v=20260727-3"></script>
+    <script type="module" src="app.js?v=20260727-4"></script>
   </body>
 </html>
