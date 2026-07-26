@@ -18,7 +18,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260727-7";
+} from "./charts.js?v=20260727-8";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -953,6 +953,8 @@ function extremeRows(payload) {
   const scored = (payload.rows || [])
     .map((row) => ({
       label: row.symbol || row.conid,
+      // Shown in front of the ticker where the card is wide enough for it.
+      secondary: row.instrument && row.instrument !== row.symbol ? row.instrument : "",
       value: numberValue(row.totalResultUsd),
       note: row.instrument,
     }))

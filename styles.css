@@ -485,6 +485,8 @@ button { color: inherit; }
 .chart { display: block; overflow: visible; }
 
 .chart-label { fill: var(--ink-2); font: 600 12px var(--sans); }
+/* The name in front of a ticker: present but plainly secondary to it. */
+.chart-sublabel { fill: var(--ink-3); font: 400 12px var(--sans); }
 .chart-value { fill: var(--ink); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; }
 .chart-tick { fill: var(--ink-3); font: 400 11px var(--mono); font-variant-numeric: tabular-nums; }
 .chart-mini { fill: var(--ink-2); font: 600 11px var(--mono); font-variant-numeric: tabular-nums; }
@@ -570,7 +572,7 @@ button { color: inherit; }
 .chart-table { padding-top: 4px; }
 .mini-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .mini-table th, .mini-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
-.mini-table thead th { color: var(--ink-3); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.mini-table thead th { color: var(--ink); background: var(--surface-raised); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 /* The label may wrap; the figure may not. The other way round is how the value ended
    up truncated on a phone, which is the one thing the table view exists to prevent. */
 .mini-table tbody th { color: var(--ink-2); font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }

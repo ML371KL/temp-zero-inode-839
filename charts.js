@@ -441,9 +441,31 @@ export function rankedBars(items, width, options = {}) {
 export function divergingBars(items, width, options = {}) {
   const rowHeight = 26;
   const barHeight = 10;
-  const labelWidth = Math.min(168, Math.max(96, Math.round(width * 0.14)));
-  const valueWidth = 118;
-  const gutter = 10;
+  const gutter = 12;
+  // Same measured columns as the ranked chart, so the two cards share a right edge:
+  // this one used to anchor its values at the card edge and the other 12 px inside it,
+  // which is exactly the amount the "$" of one stuck out past the "$" of the other.
+  const valueWidth = Math.min(
+    Math.round(width * 0.25),
+    Math.max(48, Math.ceil(Math.max(...items.map(
+      (item) => textWidth(signedCompactUsdFixed(item.value), VALUE_FONT),
+    ))) + 8),
+  );
+  const tickerWidth = Math.ceil(Math.max(...items.map((item) => textWidth(item.label, LABEL_FONT))));
+  // The full instrument name rides in front of the ticker when there is room for it.
+  // The ticker keeps the inside edge, next to its bar, because that is what the reader
+  // scans; the name is what gets shortened when the card is narrow.
+  const wantsName = options.secondary !== false
+    && items.some((item) => item.secondary)
+    && width >= 640;
+  const labelWidth = wantsName
+    ? Math.min(Math.round(width * 0.4),
+      Math.max(tickerWidth + 4, Math.ceil(Math.max(...items.map((item) => textWidth(
+        `${item.secondary || ""}  ${item.label}`, LABEL_FONT,
+      )))) + 4))
+    : Math.max(48, Math.min(Math.round(width * 0.22), tickerWidth + 4));
+  const nameSpace = labelWidth - tickerWidth - 12;
+  const showName = wantsName && nameSpace >= 70;
   const plotLeft = labelWidth + gutter;
   const plotWidth = Math.max(60, width - plotLeft - valueWidth - gutter);
   const height = items.length * rowHeight + 6;
@@ -468,11 +490,16 @@ export function divergingBars(items, width, options = {}) {
     const x = up ? zero : zero - barWidth;
     const label = truncateToWidth(item.label, LABEL_FONT, labelWidth);
     const value = signedCompactUsdFixed(item.value);
-    markup += `<g class="rank-item tone-${toneOf(item.value)}" tabindex="0" aria-label="${escapeHtml(`${item.label}: ${value}`)}" ${tipAttributes(item.label, value, item.note)}>`;
+    const textY = y + barHeight / 2 + 4;
+    markup += `<g class="rank-item tone-${toneOf(item.value)}" tabindex="0" aria-label="${escapeHtml(`${item.secondary ? `${item.secondary}, ` : ""}${item.label}: ${value}`)}" ${tipAttributes(item.label, value, item.secondary || item.note)}>`;
     markup += `<rect class="chart-hit" x="0" y="${top - 3}" width="${width}" height="${rowHeight}" />`;
-    markup += `<text class="chart-label" x="${labelWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(label)}</text>`;
+    markup += `<text class="chart-label" x="${labelWidth}" y="${textY}" text-anchor="end">${escapeHtml(label)}</text>`;
+    if (showName && item.secondary) {
+      const name = truncateToWidth(item.secondary, LABEL_FONT, nameSpace);
+      markup += `<text class="chart-sublabel" x="${labelWidth - tickerWidth - 8}" y="${textY}" text-anchor="end">${escapeHtml(name)}</text>`;
+    }
     markup += `<path class="chart-bar" d="${barPath(x, y, barWidth, barHeight, 4, up ? "right" : "left")}" />`;
-    markup += `<text class="chart-value" x="${width - 2}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(value)}</text>`;
+    markup += `<text class="chart-value" x="${plotLeft + plotWidth + valueWidth}" y="${textY}" text-anchor="end">${escapeHtml(value)}</text>`;
     markup += `<title>${escapeHtml(`${item.label}: ${value}`)}</title>`;
     markup += `</g>`;
   });
