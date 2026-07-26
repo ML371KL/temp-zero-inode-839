@@ -16,7 +16,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260726-2";
+} from "./charts.js?v=20260726-3";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -845,18 +845,37 @@ function realisedTimeline(payload) {
     point.percent = contributed > 0 ? point.value / contributed : null;
   }
 
+  // The yearly columns in percent: the year's own result against the money that was
+  // in the account by the end of it. Deliberately not the change in the cumulative
+  // ratio, which can fall in a profitable year simply because a deposit grew the
+  // denominator — a bar whose sign disagrees with the money it represents is a lie
+  // in the only place the reader is looking.
+  const contributedByYearEnd = (year) => {
+    const boundary = Date.UTC(year + 1, 0, 1);
+    let contributed = 0;
+    for (const flow of flows) {
+      if (flow.time >= boundary) break;
+      contributed += flow.amount;
+    }
+    return contributed;
+  };
+
   const totals = payload.totals || {};
   const expected = (numberValue(totals.realizedPnlUsd) || 0)
     + (numberValue(totals.dividendsNetUsd) || 0)
     + (numberValue(totals.instrumentFeesUsd) || 0);
+  const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
   return {
     points,
     percentPoints: points
       .filter((point) => point.percent !== null)
       .map((point) => ({ time: point.time, value: point.percent, delta: point.delta })),
     percentAvailable: flows.length > 0 && points.some((point) => point.percent !== null),
-    years: [...years.entries()].sort((left, right) => left[0] - right[0])
-      .map(([year, value]) => ({ label: String(year), value })),
+    years: yearList.map(([year, value]) => ({ label: String(year), value })),
+    percentYears: yearList
+      .map(([year, value]) => ({ label: String(year), value, base: contributedByYearEnd(year) }))
+      .filter((item) => item.base > 0)
+      .map((item) => ({ label: item.label, value: item.value / item.base })),
     dated,
     undated,
     expected,
@@ -970,6 +989,28 @@ function hostWidth(host) {
   return Math.max(180, Math.floor(host.getBoundingClientRect().width) || 180);
 }
 
+/**
+ * A host inside a collapsed panel, or behind the chart/table toggle, has no box.
+ * Drawing into it bakes in the fallback width, and the ResizeObserver will not
+ * correct that later: it ignores zero widths, so going hidden and back reads as
+ * "unchanged" and no redraw is scheduled. So hidden hosts are simply skipped and
+ * redrawn by whoever reveals them.
+ */
+function visibleHost(id) {
+  const host = byId(id);
+  if (!host) return null;
+  return host.getBoundingClientRect().width > 0 ? host : null;
+}
+
+/** The subtitle has to say what the percentages are a percentage of. */
+function updateTimelineNote() {
+  const percent = state.timelineMode === "percent"
+    && state.charts.get("timeline")?.percentAvailable;
+  byId("timelineNote").textContent = percent
+    ? "Накопленный результат к внесённым деньгам на ту же дату; столбцы — результат года к внесённому на конец года."
+    : (state.timelineCoverage || "");
+}
+
 function renderCharts() {
   const payload = state.payload;
   if (!payload) return;
@@ -989,16 +1030,16 @@ function renderCharts() {
   byId("extremesPanel").hidden = !extremes || extremes.length < 2;
 
   const meter = state.charts.get("meter");
-  const meterHost = byId("heroMeter");
+  const meterHost = visibleHost("heroMeter");
   if (meter && meterHost) {
     meterHost.innerHTML = splitMeter(meter.segments, hostWidth(meterHost), { height: 20 });
   }
 
-  const buildupHost = byId("buildupChart");
-  buildupHost.innerHTML = waterfall(items, hostWidth(buildupHost));
+  const buildupHost = visibleHost("buildupChart");
+  if (buildupHost) buildupHost.innerHTML = waterfall(items, hostWidth(buildupHost));
 
-  const timelineHost = byId("timelineChart");
-  if (timeline && timeline.points.length >= 2) {
+  const timelineHost = visibleHost("timelineChart");
+  if (timelineHost && timeline && timeline.points.length >= 2) {
     const percent = state.timelineMode === "percent" && timeline.percentAvailable;
     const series = percent ? timeline.percentPoints : timeline.points;
     const width = hostWidth(timelineHost);
@@ -1009,30 +1050,35 @@ function renderCharts() {
       height: 224,
       format: percent ? (value) => sharePercent(value) : undefined,
     });
-    state.charts.set("timelineGeometry", areaGeometry(series, width, { height: 224 }));
+    const format = percent ? (value) => sharePercent(value) : undefined;
+    state.charts.set("timelineGeometry", areaGeometry(series, width, { height: 224, format }));
     state.charts.set("timelineSeries", { points: series, percent });
-    const yearHost = byId("yearChart");
-    yearHost.innerHTML = columnChart(timeline.years, hostWidth(yearHost), {
-      label: "Результат по годам",
+    // The columns read in the same unit as the line above them: switching one and
+    // leaving the other showing dollars invites reading the two together.
+    const yearHost = visibleHost("yearChart");
+    const years = percent ? timeline.percentYears : timeline.years;
+    if (yearHost) yearHost.innerHTML = columnChart(years, hostWidth(yearHost), {
+      label: percent ? "Результат года к внесённым деньгам" : "Результат по годам",
+      format: percent ? (value) => `${value > 0 ? "+" : ""}${sharePercent(value)}` : undefined,
     });
   }
 
-  if (allocation && allocation.bars.length) {
-    const stripHost = byId("classStrip");
+  const stripHost = visibleHost("classStrip");
+  if (stripHost && allocation && allocation.bars.length) {
     stripHost.innerHTML = `${stackedStrip(allocation.segments, hostWidth(stripHost), { height: 20, label: "Состав счёта по классам активов" })}
       <div class="legend">
         ${allocation.segments.map((segment) => `
           <span class="legend-item"><i class="legend-swatch series-${segment.slot}"></i>${escapeHtml(segment.label)}<b>${segment.display}</b></span>
         `).join("")}
       </div>`;
-    const allocationHost = byId("allocationChart");
-    allocationHost.innerHTML = rankedBars(allocation.bars, hostWidth(allocationHost), {
+    const allocationHost = visibleHost("allocationChart");
+    if (allocationHost) allocationHost.innerHTML = rankedBars(allocation.bars, hostWidth(allocationHost), {
       label: "Открытые позиции по рыночной стоимости",
     });
   }
 
-  if (extremes && extremes.length >= 2) {
-    const extremesHost = byId("extremesChart");
+  const extremesHost = visibleHost("extremesChart");
+  if (extremesHost && extremes && extremes.length >= 2) {
     extremesHost.innerHTML = divergingBars(extremes, hostWidth(extremesHost), {
       label: "Итог по инструментам: лучшие и худшие",
     });
@@ -1046,13 +1092,13 @@ function prepareCharts(payload) {
   state.charts.set("extremes", extremeRows(payload));
 
   const drift = timeline.expected - timeline.dated;
-  const note = byId("timelineNote");
   const covered = Math.abs(timeline.expected) > 1
     ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
     : true;
-  note.textContent = covered
+  state.timelineCoverage = covered
     ? "Закрытые сделки — по дате закрытия цикла, дивиденды — по дате выплаты. Нереализованный P&L сюда не входит."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
+  updateTimelineNote();
 
   // The percent view divides by dated funding. Offering the button when there is
   // nothing to divide by would just produce an empty plot.
@@ -1096,6 +1142,7 @@ byId("timelineMode").addEventListener("click", (event) => {
   state.timelineMode = button.dataset.mode;
   byId("timelineMode").querySelectorAll("button")
     .forEach((item) => item.classList.toggle("active", item === button));
+  updateTimelineNote();
   renderCharts();
 });
 
@@ -1105,6 +1152,10 @@ byId("buildupTableToggle").addEventListener("click", (event) => {
   byId("buildupChart").hidden = state.buildupAsTable;
   event.currentTarget.setAttribute("aria-expanded", String(state.buildupAsTable));
   event.currentTarget.textContent = state.buildupAsTable ? "Графиком" : "Таблицей";
+  // Explicitly, not through the ResizeObserver: the observer ignores zero widths, so
+  // a host that was hidden at the same width it had before reads as unchanged and
+  // would keep whatever narrow SVG was last written into it.
+  if (!state.buildupAsTable) renderCharts();
 });
 
 /* Tooltips: an enhancement over marks that already carry their value in a <title>
@@ -1196,6 +1247,7 @@ window.addEventListener("resize", () => {
   resizeTimer = window.setTimeout(() => {
     resizeTimer = null;
     renderCharts();
+    syncStickyOffsets();
   }, 160);
 });
 
@@ -1258,9 +1310,9 @@ function renderAccountPanel(payload) {
     </div>
     ${bridge}
     <div class="identity-grid">
-      <div><span>Комиссии за всё время${numberValue(performance.currencyCommissionsUsd)
-        ? ` <small class="muted">(в т.ч. ${formatCost(performance.currencyCommissionsUsd)} за валютные конверсии)</small>`
-        : ""}</span><strong class="negative">${formatCost(performance.commissionsUsd)}</strong></div>
+      <div${numberValue(performance.currencyCommissionsUsd)
+        ? ` title="${escapeHtml(`В том числе ${formatCost(performance.currencyCommissionsUsd)} за валютные конверсии`)}"`
+        : ""}><span>Комиссии за всё время</span><strong class="negative">${formatCost(performance.commissionsUsd)}</strong></div>
       <div><span>Налоги со сделок</span><strong class="negative">${formatCost(performance.transactionTaxesUsd)}</strong></div>
       <div><span>Доля кэша</span><strong>${formatPercent(payload.allocation?.cashShare)}</strong></div>
       <div><span>Номинал деривативов</span><strong>${formatUsd(payload.allocation?.derivativeNotionalUsd)}</strong></div>
@@ -1270,7 +1322,7 @@ function renderAccountPanel(payload) {
     ${notCounted.length ? `
       <div class="not-counted">
         <strong>Не входит в итог по инструментам</strong>
-        ${notCounted.map(([name, value]) => `<span>${escapeHtml(name)}<b class="${pnlClass(value)}">${formatUsd(value)}</b></span>`).join("")}
+        ${notCounted.map(([name, value]) => `<span><small>${escapeHtml(name)}</small><b class="${pnlClass(value)}">${formatUsd(value)}</b></span>`).join("")}
       </div>` : ""}
   `;
 }
@@ -1710,6 +1762,24 @@ function renderRows() {
   byId("resultCount").textContent = `${rows.length} из ${state.payload?.rows?.length || 0}`;
   byId("emptyState").hidden = rows.length > 0;
   byId("resetFilters").hidden = activeFilterCount() === 0;
+  syncStickyOffsets();
+}
+
+/**
+ * The group headings stick under the column header, and the column header is not a
+ * fixed height: its labels wrap differently with the viewport, and a hard-coded
+ * offset leaves the heading half-hidden behind it. Measure it and publish the number
+ * as a custom property — CSSOM, which the page's CSP allows, unlike a style attribute.
+ */
+function syncStickyOffsets() {
+  const head = document.querySelector(".table-wrap thead");
+  const wrap = document.querySelector(".table-wrap");
+  if (!head || !wrap) return;
+  const height = Math.round(head.getBoundingClientRect().height);
+  if (height > 0) wrap.style.setProperty("--head-height", `${height}px`);
+  // The expanded card is pinned to the scrollport and has to be exactly as wide as
+  // it, which no CSS length can express: the cell it lives in is table-width.
+  if (wrap.clientWidth > 0) wrap.style.setProperty("--wrap-width", `${wrap.clientWidth}px`);
 }
 
 function toggleRow(conid) {

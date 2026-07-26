@@ -350,7 +350,7 @@ button { color: inherit; }
 .hero-note { color: var(--ink-3); font-size: 12px; }
 
 .hero-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 22px; }
-.hero-facts > div { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); }
+.hero-facts > div { display: flex; flex-direction: column; justify-content: space-between; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-raised); }
 .hero-facts span { display: block; color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .hero-facts strong { display: block; margin-top: 5px; font: 600 15px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .hero-facts small { display: block; margin-top: 4px; color: var(--ink-3); font-size: 10.5px; line-height: 1.35; }
@@ -433,9 +433,11 @@ button { color: inherit; }
   gap: 0;
   padding: 14px 56px 14px 20px;
 }
-.hero-panel.is-collapsed .hero-sub,
 .hero-panel.is-collapsed .hero-facts,
 .hero-panel.is-collapsed .hero-side { display: none; }
+/* The badge and the start date ride along on the folded strip: they qualify the
+   figure, and a bare number without "к внесённым деньгам" invites the wrong reading. */
+.hero-panel.is-collapsed .hero-sub { margin: 0; }
 .hero-panel.is-collapsed .hero-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; }
 .hero-panel.is-collapsed .eyebrow { margin: 0; }
 .hero-panel.is-collapsed .hero-figure { font-size: 22px; letter-spacing: -0.02em; }
@@ -547,11 +549,14 @@ button { color: inherit; }
 .chart-tooltip small { color: var(--ink-3); font-size: 11px; line-height: 1.4; }
 
 .chart-table { padding-top: 4px; }
-.mini-table { width: 100%; border-collapse: collapse; }
+.mini-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .mini-table th, .mini-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
 .mini-table thead th { color: var(--ink-3); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-.mini-table tbody th { color: var(--ink-2); font-weight: 500; }
-.mini-table td.numeric { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* The label may wrap; the figure may not. The other way round is how the value ended
+   up truncated on a phone, which is the one thing the table view exists to prevent. */
+.mini-table tbody th { color: var(--ink-2); font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+.mini-table .numeric { text-align: right; }
+.mini-table td.numeric { width: 44%; white-space: nowrap; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .mini-table tr.is-total th, .mini-table tr.is-total td { color: var(--ink); font-weight: 700; background: var(--surface-raised); }
 
 /* =================================================================== account */
@@ -579,13 +584,14 @@ button { color: inherit; }
 .bridge-line.is-secondary .bridge-term b { font-size: 14px; color: var(--ink-2); }
 
 .identity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
-.identity-grid > div { padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.identity-grid > div { display: flex; flex-direction: column; justify-content: space-between; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .identity-grid span { display: block; color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .identity-grid strong { display: block; margin-top: 5px; font: 600 14px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
-.not-counted { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
+.not-counted { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
 .not-counted strong { grid-column: 1 / -1; color: var(--warning); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-.not-counted span { display: flex; justify-content: space-between; gap: 12px; color: var(--ink-2); font-size: 12px; }
-.not-counted b { font: 600 13px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.not-counted span { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
+.not-counted small { color: var(--ink-3); font-size: 11px; line-height: 1.3; text-transform: uppercase; letter-spacing: 0.03em; }
+.not-counted b { font: 600 14px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 
 /* ================================================================= portfolio */
 
@@ -621,7 +627,7 @@ select { min-height: 40px; max-width: 165px; border: 1px solid var(--line); bord
    1500 px viewport without horizontal scrolling: the column that answers the
    owner's question must not be the one that starts off-screen. */
 .table-wrap { width: 100%; max-height: 78vh; overflow: auto; border-top: 1px solid var(--line); }
-table { width: 100%; min-width: 1422px; border-collapse: collapse; table-layout: fixed; }
+.table-wrap table { width: 100%; min-width: 1422px; border-collapse: collapse; table-layout: fixed; }
 .column-instrument { width: 168px; }
 .column-currency { width: 60px; }
 .column-status { width: 92px; }
@@ -632,7 +638,7 @@ table { width: 100%; min-width: 1422px; border-collapse: collapse; table-layout:
 .column-money { width: 112px; }
 .column-total { width: 120px; }
 
-th {
+.table-wrap th {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -646,7 +652,7 @@ th {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-td {
+.table-wrap td {
   padding: 11px 10px;
   border-bottom: 1px solid var(--line);
   color: var(--ink);
@@ -656,7 +662,7 @@ td {
 }
 /* Numbers are never ellipsised: a truncated figure is a wrong figure. Text cells
    may clip, money cells get the width they need instead. */
-td:not(.numeric) { overflow: hidden; text-overflow: ellipsis; }
+.table-wrap td:not(.numeric) { overflow: hidden; text-overflow: ellipsis; }
 
 .sort-button { width: 100%; min-height: 38px; display: inline-flex; align-items: center; gap: 4px; justify-content: flex-start; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; line-height: 1.25; text-align: left; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
 .numeric .sort-button { justify-content: flex-end; text-align: right; }
@@ -669,9 +675,9 @@ tbody tr.data-row:hover { background: var(--surface-hover); }
 tbody tr.data-row:hover .expand-chevron { opacity: 1; }
 tbody tr.data-row.expanded { background: var(--surface-hover); }
 tbody tr.data-row.expanded .expand-chevron { opacity: 1; transform: rotate(90deg); }
-th:first-child, td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.table-wrap th:first-child, .table-wrap td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:first-child, tbody tr.data-row.expanded td:first-child { background: var(--surface-raised); }
-th:first-child { z-index: 3; background: var(--surface-raised); }
+.table-wrap th:first-child { z-index: 3; background: var(--surface-raised); }
 /* Which instrument, and what it came to: the two ends of the row are pinned, so on a
    narrower screen the columns that scroll away are the working-out, not the answer. */
 thead th:last-child, tbody tr.data-row td:last-child {
@@ -682,17 +688,17 @@ thead th:last-child, tbody tr.data-row td:last-child {
 thead th:last-child { z-index: 3; background: var(--surface-raised); }
 tbody tr.data-row td:last-child { z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child { background: var(--surface-raised); }
-.numeric { text-align: right; }
+.table-wrap .numeric { text-align: right; }
 
 .group-row td {
   position: sticky;
-  top: 37px;
+  top: var(--head-height, 38px);
   z-index: 1;
   padding: 7px 10px;
   border-bottom: 1px solid var(--line-strong);
   background: var(--surface-sunken);
 }
-.group-row .group-cell { z-index: 2; overflow: visible; }
+.table-wrap .group-row .group-cell { z-index: 2; overflow: visible; text-overflow: clip; }
 .group-row span { color: var(--ink-2); font: 700 10px var(--sans); text-transform: uppercase; letter-spacing: 0.09em; }
 .group-row b { margin-left: 8px; color: var(--ink-3); font: 600 11px var(--mono); }
 
@@ -850,8 +856,31 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   .totals-check { margin-inline: 14px; }
   .bridge-line { display: grid; grid-template-columns: 1fr; }
   .bridge-op { display: none; }
-  .detail-wrap { padding: 16px; }
+  /* The row scrolls sideways; its expanded detail must not. The pin goes on the inner
+     card, never on the cell: a sticky box cannot move within a containing block it
+     already fills, and the cell spans the whole table. The cell also has to give up
+     `overflow: hidden`, or it becomes the scrollport the card sticks to and nothing
+     moves at all. */
+  .table-wrap .detail-row td { position: static; overflow: visible; }
+  .detail-wrap { position: sticky; left: 0; width: var(--wrap-width, calc(100vw - 24px)); max-width: 100%; padding: 14px; }
+  .detail-grid, .cycle-facts { grid-template-columns: 1fr 1fr; }
+  .detail-item strong { font-size: 11.5px; }
   .cycle-item header strong { margin-left: 0; width: 100%; }
+  .alert-panel { max-width: none; }
+
+  /* Only the instrument stays pinned. With the total pinned as well there was almost
+     no room left between them, and the columns in the middle became unreachable. */
+  .table-wrap thead th:last-child,
+  .table-wrap tbody tr.data-row td:last-child { position: static; border-left: 0; }
+  .table-wrap table { min-width: 1290px; }
+  .table-wrap th, .table-wrap td { padding-inline: 7px; }
+  .column-instrument { width: 128px; }
+  .column-cycle { width: 108px; }
+  .column-price { width: 120px; }
+  .column-money { width: 102px; }
+  .column-total { width: 108px; }
+  .instrument-avatar { display: none; }
+  .instrument-cell { gap: 6px; }
   .alert-heading { flex-direction: column; }
   .alert-grid { grid-template-columns: 1fr; }
   .break-even-card { grid-column: auto; }

@@ -186,16 +186,21 @@ export function waterfall(items, width) {
  * `options.format` decides how ticks and the end label read, so the same plot can
  * show money or a ratio without a second axis ever appearing.
  */
-export function areaChart(points, width, options = {}) {
+const TICK_FONT = '400 11px ui-monospace, "SFMono-Regular", Consolas, monospace';
+const END_FONT = '700 12px ui-monospace, "SFMono-Regular", Consolas, monospace';
+
+/**
+ * Shared by the plot and by the hover layer, which have to agree to the pixel.
+ * The right gutter is measured from the widest tick label rather than fixed, so
+ * "6 млн $" and "1 250 %" each get exactly the room they need and no more.
+ */
+function areaLayout(points, width, options = {}) {
   const format = options.format || compactUsd;
   const height = options.height || 220;
   const padTop = 18;
   const padBottom = 26;
-  const padRight = options.padRight ?? 96;
   const padLeft = 8;
-  const plotWidth = Math.max(60, width - padLeft - padRight);
   const plotHeight = height - padTop - padBottom;
-  if (points.length < 2) return "";
 
   const values = points.map((point) => point.value);
   const rawMin = Math.min(0, ...values);
@@ -203,12 +208,28 @@ export function areaChart(points, width, options = {}) {
   const span = rawMax - rawMin || 1;
   const min = rawMin - span * 0.06;
   const max = rawMax + span * 0.08;
-  const first = points[0].time;
-  const last = points[points.length - 1].time;
+
+  const ticks = niceTicks(min, max, 4);
+  const gutter = Math.ceil(Math.max(28, ...ticks.map((tick) => textWidth(format(tick), TICK_FONT)))) + 12;
+  const plotWidth = Math.max(60, width - padLeft - gutter);
+
+  const first = points[0]?.time ?? 0;
+  const last = points[points.length - 1]?.time ?? 1;
   const timeSpan = last - first || 1;
 
-  const x = (time) => padLeft + ((time - first) / timeSpan) * plotWidth;
-  const y = (value) => padTop + (1 - (value - min) / (max - min)) * plotHeight;
+  return {
+    format, height, padTop, padBottom, padLeft, plotHeight, plotWidth, gutter,
+    min, max, ticks, first, last,
+    x: (time) => padLeft + ((time - first) / timeSpan) * plotWidth,
+    y: (value) => padTop + (1 - (value - min) / (max - min)) * plotHeight,
+    fromX: (px) => first + ((px - padLeft) / plotWidth) * timeSpan,
+  };
+}
+
+export function areaChart(points, width, options = {}) {
+  if (points.length < 2) return "";
+  const layout = areaLayout(points, width, options);
+  const { format, height, padTop, padLeft, plotHeight, plotWidth, min, max, ticks, first, last, x, y } = layout;
 
   const line = points.map((point, index) => `${index ? "L" : "M"}${x(point.time).toFixed(1)} ${y(point.value).toFixed(1)}`).join(" ");
   const baseline = y(Math.max(min, Math.min(0, max)));
@@ -218,7 +239,6 @@ export function areaChart(points, width, options = {}) {
 
   // Gridlines: solid hairlines, one step off the surface, carrying the values that
   // are not directly labelled.
-  const ticks = niceTicks(min, max, 4);
   for (const tick of ticks) {
     const ty = y(tick);
     if (ty < padTop - 2 || ty > padTop + plotHeight + 2) continue;
@@ -238,14 +258,16 @@ export function areaChart(points, width, options = {}) {
   markup += `<path class="chart-area" d="${area}" />`;
   markup += `<path class="chart-line" d="${line}" />`;
 
-  // The one directly-labelled point. It is placed left of the endpoint when there
-  // is no room to its right, rather than being allowed to run past the edge.
+  // The one directly-labelled point. It is drawn inside the plot, to the left of the
+  // endpoint: the space to its right belongs to the axis ticks, and a label placed
+  // there lands on whichever tick happens to sit at the same height.
   const endValue = points[points.length - 1].value;
   const endText = format(endValue);
   const endX = x(last);
-  const fits = endX + 10 + textWidth(endText, '700 12px ui-monospace, monospace') < width - 4;
-  markup += `<circle class="chart-endpoint" cx="${endX.toFixed(1)}" cy="${y(endValue).toFixed(1)}" r="4.5" />`;
-  markup += `<text class="chart-endlabel" x="${(fits ? endX + 10 : endX - 10).toFixed(1)}" y="${(y(endValue) - 10).toFixed(1)}" text-anchor="${fits ? "start" : "end"}">${escapeHtml(endText)}</text>`;
+  const endY = y(endValue);
+  const labelY = Math.min(Math.max(endY - 11, padTop + 11), padTop + plotHeight - 3);
+  markup += `<circle class="chart-endpoint" cx="${endX.toFixed(1)}" cy="${endY.toFixed(1)}" r="4.5" />`;
+  markup += `<text class="chart-endlabel" x="${(endX - 9).toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="end">${escapeHtml(endText)}</text>`;
 
   // One hit rectangle for the whole plot; the nearest point is found on move, so a
   // reader never has to land on the line itself.
@@ -257,28 +279,13 @@ export function areaChart(points, width, options = {}) {
 
 /** Geometry the hover layer needs to map a pointer position back to a data point. */
 export function areaGeometry(points, width, options = {}) {
-  const height = options.height || 220;
-  const padTop = 18;
-  const padBottom = 26;
-  const padRight = options.padRight ?? 96;
-  const padLeft = 8;
-  const plotWidth = Math.max(60, width - padLeft - padRight);
-  const plotHeight = height - padTop - padBottom;
-  const values = points.map((point) => point.value);
-  const rawMin = Math.min(0, ...values);
-  const rawMax = Math.max(0, ...values);
-  const span = rawMax - rawMin || 1;
-  const min = rawMin - span * 0.06;
-  const max = rawMax + span * 0.08;
-  const first = points[0]?.time ?? 0;
-  const last = points[points.length - 1]?.time ?? 1;
-  const timeSpan = last - first || 1;
+  const layout = areaLayout(points, width, options);
   return {
-    toX: (time) => padLeft + ((time - first) / timeSpan) * plotWidth,
-    toY: (value) => padTop + (1 - (value - min) / (max - min)) * plotHeight,
-    fromX: (px) => first + ((px - padLeft) / plotWidth) * timeSpan,
-    padLeft,
-    plotWidth,
+    toX: layout.x,
+    toY: layout.y,
+    fromX: layout.fromX,
+    padLeft: layout.padLeft,
+    plotWidth: layout.plotWidth,
   };
 }
 
@@ -309,6 +316,9 @@ function yearTicks(first, last) {
 
 /** Columns for a small ordered set — one per year. Diverging by sign. */
 export function columnChart(items, width, options = {}) {
+  // The columns are the yearly change of the line above them, so they have to read in
+  // whatever unit the line is currently showing.
+  const format = options.format || signedCompactUsd;
   const height = options.height || 156;
   // Room above for the caps of positive columns and below for two stacked rows:
   // the value under a negative column, then the year. Sized so the two never meet.
@@ -335,13 +345,14 @@ export function columnChart(items, width, options = {}) {
     const up = item.value >= 0;
     const y = up ? zeroY - barHeight : zeroY;
     const tone = toneOf(item.value);
-    markup += `<g class="col-item tone-${tone}" tabindex="0" aria-label="${escapeHtml(`${item.label}: ${signedCompactUsd(item.value)}`)}" ${tipAttributes(item.label, signedCompactUsd(item.value), item.note)}>`;
+    const shown = format(item.value);
+    markup += `<g class="col-item tone-${tone}" tabindex="0" aria-label="${escapeHtml(`${item.label}: ${shown}`)}" ${tipAttributes(item.label, shown, item.note)}>`;
     markup += `<rect class="chart-hit" x="${(centre - slot / 2).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${height}" />`;
     markup += `<path class="chart-bar" d="${barPath(x, y, barWidth, barHeight, 4, up ? "up" : "down")}" />`;
     const capY = up ? y - 7 : Math.min(y + barHeight + 13, height - padBottom + 14);
-    markup += `<text class="chart-mini" x="${centre.toFixed(1)}" y="${capY.toFixed(1)}" text-anchor="middle">${escapeHtml(signedCompactUsd(item.value))}</text>`;
+    markup += `<text class="chart-mini" x="${centre.toFixed(1)}" y="${capY.toFixed(1)}" text-anchor="middle">${escapeHtml(shown)}</text>`;
     markup += `<text class="chart-tick" x="${centre.toFixed(1)}" y="${height - 7}" text-anchor="middle">${escapeHtml(item.label)}</text>`;
-    markup += `<title>${escapeHtml(`${item.label}: ${signedCompactUsd(item.value)}`)}</title>`;
+    markup += `<title>${escapeHtml(`${item.label}: ${shown}`)}</title>`;
     markup += `</g>`;
   });
   return `${markup}</svg>`;
