@@ -185,7 +185,14 @@
               <button type="button" data-tab="review">Проверить</button>
             </div>
             <div class="select-filters">
-              <select id="assetFilter" aria-label="Класс актива"><option value="">Все классы</option></select>
+              <details id="assetScope" class="scope-filter">
+                <summary id="assetScopeSummary" aria-label="Классы активов">Все классы</summary>
+                <div class="scope-menu">
+                  <p class="scope-note">Выбор задаёт срез всей страницы, а не только таблицы</p>
+                  <div id="assetScopeOptions" class="scope-options"></div>
+                  <button id="assetScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
               <select id="directionFilter" aria-label="Направление">
                 <option value="">Long + Short</option><option value="LONG">Long</option><option value="SHORT">Short</option>
               </select>

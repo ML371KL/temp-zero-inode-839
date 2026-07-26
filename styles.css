@@ -372,6 +372,10 @@ button { color: inherit; }
 .hero-check.tone-warning strong { color: var(--warning); }
 .hero-check.tone-error .hero-check-dot { background: var(--negative); }
 .hero-check.tone-error strong { color: var(--negative); }
+/* Neutral on purpose: a narrowed page is a choice the reader made, not a problem
+   with the data, so it must not borrow the colour of one. */
+.hero-check.tone-info .hero-check-dot { background: var(--accent); }
+.hero-check.tone-info strong { color: var(--ink-1); }
 
 /* ==================================================================== panels */
 
@@ -945,4 +949,43 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+
+/* --------------------------------------------------------------- scope filter --- */
+/* A <details> rather than a scripted popover: the disclosure, the keyboard handling
+   and the escape-to-close all come from the element, and nothing here needs an
+   inline style, which the page's CSP forbids. */
+.scope-filter { position: relative; }
+.scope-filter > summary {
+  display: flex; align-items: center; gap: 6px; min-height: 32px; max-width: 172px;
+  padding: 4px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-raised); color: var(--ink-2); font-size: 13px;
+  white-space: nowrap; cursor: pointer; list-style: none;
+}
+.scope-filter > summary::-webkit-details-marker { display: none; }
+.scope-filter > summary::after {
+  content: "▾"; margin-left: auto; color: var(--ink-3); font-size: 11px;
+}
+.scope-filter[open] > summary { border-color: var(--accent); color: var(--ink-1); }
+.scope-filter > summary.is-narrowed { border-color: var(--accent); color: var(--ink-1); }
+.scope-menu {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 232px;
+  padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-raised); box-shadow: 0 12px 30px rgb(0 0 0 / 28%);
+}
+.scope-note { margin: 0 0 9px; color: var(--ink-3); font-size: 11px; line-height: 1.35; }
+.scope-options { display: grid; gap: 2px; margin-bottom: 9px; }
+.scope-option {
+  display: flex; align-items: center; gap: 8px; padding: 5px 6px;
+  border-radius: 6px; color: var(--ink-1); font-size: 13px; cursor: pointer;
+}
+.scope-option:hover { background: var(--surface-sunken); }
+.scope-option input { margin: 0; }
+.scope-option b { margin-left: auto; color: var(--ink-3); font: 400 11px/1 var(--mono); }
+.scope-filter .ghost-button { width: 100%; }
+
+@media (max-width: 760px) {
+  /* The row scrolls sideways on a phone, and an absolutely positioned menu inside a
+     scroll container is clipped by it. Here the menu opens in the flow instead. */
+  .scope-menu { position: static; min-width: 0; margin-top: 6px; box-shadow: none; }
 }

@@ -43,7 +43,185 @@ const state = {
   // of, and the chart is the illustration of it.
   buildupAsTable: true,
   timelineMode: "absolute",
+  // Which asset classes the whole page is about. Empty means every class; the
+  // selection is restored from localStorage on load.
+  assetScope: new Set(),
 };
+
+/* ------------------------------------------------------------------ scope --- */
+
+/*
+ * The asset-class filter is not a table filter. Futures on this account were one leg
+ * of an arbitrage whose other leg lived at a different broker, so their loss here is
+ * real money that is answered for elsewhere; leaving them in makes every headline
+ * figure describe a strategy rather than the trading. Narrowing the scope therefore
+ * has to reach the summary blocks, not just the rows.
+ *
+ * What it cannot reach is the account. Interest, account fees, currency conversions
+ * and the cash balance belong to no instrument, and net contributions were paid into
+ * the account as a whole. So a narrowed page answers a different question — what the
+ * chosen instruments did — and says so, instead of quietly relabelling the old one.
+ */
+const SCOPE_KEY = "portfolio-ledger:asset-scope";
+
+function storedScope() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(SCOPE_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistScope() {
+  try {
+    window.localStorage.setItem(SCOPE_KEY, JSON.stringify([...state.assetScope]));
+  } catch {
+    /* Private mode: the choice still holds for this session. */
+  }
+}
+
+/** Classes present in the payload, in a stable order. */
+function scopeUniverse() {
+  return [...new Set((state.payload?.rows || []).map((row) => String(row.assetClass || "—")))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Drop a remembered class the current payload does not have.
+ *
+ * Without this a scope saved when futures existed would survive into a payload
+ * without them and read as a narrowing of nothing, or — if every remembered class
+ * were gone — empty the page with no visible cause.
+ */
+function pruneScope() {
+  const universe = new Set(scopeUniverse());
+  for (const value of [...state.assetScope]) {
+    if (!universe.has(value)) state.assetScope.delete(value);
+  }
+}
+
+/** True when the selection actually leaves something out. */
+function scopeNarrowed() {
+  const universe = scopeUniverse();
+  if (!state.assetScope.size) return false;
+  return universe.some((value) => !state.assetScope.has(value));
+}
+
+function inScope(row) {
+  if (!state.assetScope.size) return true;
+  return state.assetScope.has(String(row.assetClass || "—"));
+}
+
+function scopedRows() {
+  return (state.payload?.rows || []).filter(inScope);
+}
+
+function scopeLabel() {
+  if (!scopeNarrowed()) return "Все классы";
+  return [...state.assetScope]
+    .sort((left, right) => left.localeCompare(right))
+    .map((value) => ASSET_CLASS_LABELS[value] || value)
+    .join(" + ");
+}
+
+/**
+ * Money-weighted return of a set of instruments, from their own cash flows.
+ *
+ * Buying is money out, selling and dividends are money in, and whatever is still
+ * open is money that would come in today. `cashUsd` is used rather than price times
+ * quantity because only it is converted, and at the rate of its own execution.
+ *
+ * Dividends are dated by payment, not by ex-date: this asks when the cash moved, and
+ * the cumulative chart asks which position earned it. The two dates disagree by
+ * weeks and each block uses the one its own question needs.
+ */
+function scopeFlows(rows, asOf) {
+  const flows = [];
+  let terminal = 0;
+  let terminalKnown = true;
+  for (const row of rows) {
+    for (const cycle of row.cycles || []) {
+      for (const trade of cycle.trades || []) {
+        const amount = numberValue(trade.cashUsd);
+        const time = timeValue(trade.timestamp);
+        if (amount && time !== null) flows.push({ time, amount });
+      }
+      for (const event of cycle.cashEvents || []) {
+        const amount = numberValue(event.amountUsd);
+        const time = timeValue(event.timestamp);
+        if (amount && time !== null) flows.push({ time, amount });
+      }
+    }
+    if (isOpen(row)) {
+      const value = numberValue(row.marketValueUsd);
+      if (value === null) terminalKnown = false;
+      else terminal += value;
+    }
+  }
+  if (asOf !== null && terminal) flows.push({ time: asOf, amount: terminal });
+  return { flows, terminalKnown };
+}
+
+/** Bisection, matching the pipeline: it cannot diverge, and a basis point is enough. */
+function xirr(flows) {
+  if (flows.length < 2) return null;
+  if (!flows.some((flow) => flow.amount > 0)) return null;
+  if (!flows.some((flow) => flow.amount < 0)) return null;
+  const start = Math.min(...flows.map((flow) => flow.time));
+  // 31 557 600 seconds is a Julian year, the same divisor the pipeline uses; 365
+  // would put this a fraction of a basis point away from the account figure.
+  const dated = flows.map((flow) => ({
+    years: (flow.time - start) / 31_557_600_000,
+    amount: flow.amount,
+  }));
+  const presentValue = (rate) =>
+    dated.reduce((sum, item) => sum + item.amount / (1 + rate) ** item.years, 0);
+  let low = -0.9999;
+  let high = 10;
+  const lowValue = presentValue(low);
+  if (lowValue * presentValue(high) > 0) return null;
+  for (let step = 0; step < 200; step += 1) {
+    const middle = (low + high) / 2;
+    const value = presentValue(middle);
+    if (Math.abs(value) < 1e-9) return middle;
+    if (lowValue * value <= 0) high = middle;
+    else low = middle;
+  }
+  return (low + high) / 2;
+}
+
+/**
+ * Everything the narrowed blocks need, computed once per scope rather than once per
+ * caller. The hero, the buildup and the timeline each ask for it during one redraw,
+ * and the money-weighted return is a two-hundred-step bisection over every execution
+ * in the account: recomputing it three times made switching classes visibly slow.
+ */
+let scopeCache = null;
+
+function scopeSummary(payload) {
+  const key = `${payload.generatedAt}|${[...state.assetScope].sort().join(",")}`;
+  if (scopeCache && scopeCache.key === key) return scopeCache.value;
+  const rows = scopedRows();
+  const sum = (key) => rows.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
+  const asOf = timeValue(payload.generatedAt);
+  const { flows, terminalKnown } = scopeFlows(rows, asOf);
+  const value = {
+    rows,
+    narrowed: scopeNarrowed(),
+    label: scopeLabel(),
+    result: sum("totalResultUsd"),
+    realized: sum("realizedPnlUsd"),
+    unrealized: sum("unrealizedPnlUsd"),
+    dividends: sum("dividendsNetUsd"),
+    fees: sum("otherFeesUsd"),
+    marketValue: sum("marketValueUsd"),
+    openCount: rows.filter(isOpen).length,
+    moneyWeighted: terminalKnown ? xirr(flows) : null,
+  };
+  scopeCache = { key, value };
+  return value;
+}
 
 const byId = (id) => document.getElementById(id);
 const unlockView = byId("unlockView");
@@ -512,10 +690,11 @@ function filterContext(rows) {
   if (tabLabels[state.activeTab]) parts.push(tabLabels[state.activeTab]);
   const search = byId("searchInput").value.trim();
   if (search) parts.push(`поиск «${search}»`);
-  for (const id of ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]) {
+  for (const id of ["directionFilter", "currencyFilter", "profitFilter"]) {
     const select = byId(id);
     if (select.value) parts.push(select.selectedOptions[0]?.textContent || select.value);
   }
+  if (scopeNarrowed()) parts.unshift(scopeLabel());
   return `${rows.length} из ${total}${parts.length ? ` · ${parts.join(" · ")}` : " · все инструменты"}`;
 }
 
@@ -608,9 +787,13 @@ function renderHero(payload) {
   const status = payload.status || {};
   const rows = payload.rows || [];
 
+  const scope = scopeSummary(payload);
   const result = numberValue(identity.accountResultUsd);
   const fallback = result === null ? numberValue(payload.totals?.totalResultUsd) : null;
-  const headline = result === null ? fallback : result;
+  // Narrowed, the headline is what the chosen instruments made. It cannot be the
+  // account result: that one includes interest, account fees and the currency
+  // conversions, none of which belong to an asset class.
+  const headline = scope.narrowed ? scope.result : (result === null ? fallback : result);
   const contributions = numberValue(identity.netContributionsUsd);
   const returnOnMoney = contributions ? headline / Math.abs(contributions) : null;
   const identityStatus = payload.accountIdentity ? identity.status : "NO_ACCOUNT_BLOCK";
@@ -636,28 +819,45 @@ function renderHero(payload) {
       { label: "Кэш", value: Math.max(0, cash), slot: 1, display: formatUsd(cash) },
     ];
 
-  const openCount = Number(status.openPositionCount || rows.filter(isOpen).length);
+  const openCount = scope.narrowed
+    ? scope.openCount
+    : Number(status.openPositionCount || rows.filter(isOpen).length);
   // A dash says nothing about why. Where a figure is missing because the snapshot
   // never carried it, the tile says which section of the report would supply it.
   const missingHint = payload.accountIdentity
     ? "нет событий Deposits/Withdrawals в Activity Flex"
     : "нет в этом снимке — нужна свежая синхронизация";
-  const facts = [
-    ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
-      contributions === null ? missingHint : ""],
-    ["Сейчас на счёте", formatUsd(netAssetValue), "",
-      netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
-    ["Годовая доходность, XIRR", formatPercent(performance.moneyWeightedReturn),
-      pnlClass(performance.moneyWeightedReturn),
-      numberValue(performance.moneyWeightedReturn) === null ? missingHint : ""],
-    ["Открытых позиций", `${openCount} из ${rows.length}`, "", ""],
-  ];
+  const facts = scope.narrowed
+    ? [
+      ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
+        "база процента: деньги вносились на счёт целиком, а не в отдельный класс"],
+      ["Стоимость этих позиций", formatUsd(scope.marketValue), "",
+        scope.openCount ? "" : "в этом срезе нет открытых позиций"],
+      ["Годовая доходность, XIRR", formatPercent(scope.moneyWeighted),
+        pnlClass(scope.moneyWeighted),
+        scope.moneyWeighted === null
+          ? "по этому срезу доходность не считается: нет и вложений, и возвратов"
+          : "по собственным денежным потокам этих инструментов"],
+      ["Инструментов в срезе", `${openCount} откр. из ${scope.rows.length}`, "", ""],
+    ]
+    : [
+      ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
+        contributions === null ? missingHint : ""],
+      ["Сейчас на счёте", formatUsd(netAssetValue), "",
+        netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
+      ["Годовая доходность, XIRR", formatPercent(performance.moneyWeightedReturn),
+        pnlClass(performance.moneyWeightedReturn),
+        numberValue(performance.moneyWeightedReturn) === null ? missingHint : ""],
+      ["Открытых позиций", `${openCount} из ${rows.length}`, "", ""],
+    ];
 
   byId("heroPanel").innerHTML = `
     <button class="collapse-toggle hero-collapse" type="button" data-collapse-for="hero"
       aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button>
     <div class="hero-main">
-      <p class="eyebrow">Заработано за всё время</p>
+      <p class="eyebrow">${scope.narrowed
+        ? `Заработано за всё время · ${escapeHtml(scope.label)}`
+        : "Заработано за всё время"}</p>
       <p class="hero-figure ${pnlClass(headline)}">${formatSignedUsd(headline)}</p>
       <p class="hero-sub">
         ${returnOnMoney === null ? "" : `<span class="hero-badge ${pnlClass(returnOnMoney)}">${escapeHtml(returnOnMoney > 0 ? "+" : "")}${formatPercent(returnOnMoney, 1)} к внесённым деньгам</span>`}
@@ -687,6 +887,14 @@ function renderHero(payload) {
           `).join("")}
         </div>
       </div>` : ""}
+      ${scope.narrowed ? `
+      <div class="hero-check tone-info">
+        <span class="hero-check-dot" aria-hidden="true"></span>
+        <span>
+          <strong>Показан срез: ${escapeHtml(scope.label)}</strong>
+          <small>только результат инструментов — проценты брокера, сборы по счёту и валютные конверсии в него не входят</small>
+        </span>
+      </div>` : `
       <div class="hero-check tone-${tone}">
         <span class="hero-check-dot" aria-hidden="true"></span>
         <span>
@@ -695,7 +903,7 @@ function renderHero(payload) {
             ? escapeHtml(IDENTITY_HINTS[identityStatus] || "сверка со счётом недоступна")
             : `расхождение ${formatUsd(identity.differenceUsd)} при допуске ${formatUsd(identity.toleranceUsd)}`}</small>
         </span>
-      </div>
+      </div>`}
     </div>
   `;
   state.charts.set("meter", { segments: meterSegments });
@@ -708,8 +916,26 @@ function renderHero(payload) {
  * instruments first, then everything that never belonged to a position.
  */
 function buildupItems(payload) {
-  const totals = payload.totals || {};
-  const accountCash = payload.accountCash || {};
+  const scope = scopeSummary(payload);
+  const accountCash = scope.narrowed ? {} : (payload.accountCash || {});
+  // Narrowed, every component is re-summed over the chosen rows. Reading them from
+  // `totals` would print account-wide numbers under a heading that promises a subset.
+  const totals = scope.narrowed
+    ? {
+      realizedPnlUsd: scope.realized,
+      unrealizedPnlUsd: scope.unrealized,
+      dividendsNetUsd: scope.dividends,
+      dividendsGrossUsd: scope.rows.reduce(
+        (sum, row) => sum + (numberValue(row.dividendsGrossUsd) || 0), 0),
+      withholdingTaxUsd: scope.rows.reduce(
+        (sum, row) => sum + (numberValue(row.withholdingTaxUsd) || 0), 0),
+      instrumentFeesUsd: scope.fees,
+      commissionsUsd: scope.rows.reduce(
+        (sum, row) => sum + (numberValue(row.commissionsUsd) || 0), 0),
+      fxRealizedPnlUsd: scope.rows.reduce(
+        (sum, row) => sum + (numberValue(row.fxRealizedPnlUsd) || 0), 0),
+    }
+    : (payload.totals || {});
   const commissions = numberValue(totals.commissionsUsd);
   const fxRealized = numberValue(totals.fxRealizedPnlUsd);
   const items = [
@@ -736,7 +962,11 @@ function buildupItems(payload) {
   if (instrumentFees) {
     items.push({ label: "Сборы по инструментам", value: instrumentFees, note: "" });
   }
-  items.push({ label: "Итог по инструментам", kind: "total", note: "сумма всех строк таблицы" });
+  items.push({
+    label: scope.narrowed ? `Итог · ${scope.label}` : "Итог по инструментам",
+    kind: "total",
+    note: scope.narrowed ? "сумма строк выбранных классов" : "сумма всех строк таблицы",
+  });
 
   const extras = [
     ["Проценты брокера", accountCash.interestUsd, "начислены на остаток"],
@@ -790,7 +1020,7 @@ function realisedTimeline(payload) {
     dated += amount;
   };
 
-  for (const row of payload.rows || []) {
+  for (const row of scopedRows()) {
     for (const cycle of row.cycles || []) {
       const realized = numberValue(cycle.realizedPnlUsd) || 0;
       if (realized) {
@@ -846,10 +1076,14 @@ function realisedTimeline(payload) {
   const contributed = flows.reduce((sum, flow) => sum + flow.amount, 0);
   const share = (value) => (contributed > 0 ? value / contributed : null);
 
-  const totals = payload.totals || {};
-  const expected = (numberValue(totals.realizedPnlUsd) || 0)
-    + (numberValue(totals.dividendsNetUsd) || 0)
-    + (numberValue(totals.instrumentFeesUsd) || 0);
+  // The self-check has to be summed over the same rows the line was built from, or
+  // a narrowed page reports its own filter as missing data.
+  const scoped = scopedRows();
+  const sumRows = (key) =>
+    scoped.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
+  const expected = sumRows("realizedPnlUsd")
+    + sumRows("dividendsNetUsd")
+    + sumRows("otherFeesUsd");
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
   return {
     points,
@@ -950,7 +1184,7 @@ function allocationModel(payload) {
 }
 
 function extremeRows(payload) {
-  const scored = (payload.rows || [])
+  const scored = scopedRows()
     .map((row) => ({
       label: row.symbol || row.conid,
       // Shown in front of the ticker where the card is wide enough for it.
@@ -1108,7 +1342,10 @@ function prepareCharts(payload) {
     ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
     : true;
   state.timelineCoverage = covered
-    ? "Закрытые сделки — по дате закрытия цикла, дивиденды — по дате выплаты. Нереализованный P&L сюда не входит."
+    // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
+    // which position earned it; the payment can land weeks later and in another year.
+    // The note used to say "по дате выплаты" and described the wrong column.
+    ? "Закрытые сделки — по дате закрытия цикла, дивиденды — по дате отсечки. Нереализованный P&L сюда не входит."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
   updateTimelineNote();
 
@@ -1438,8 +1675,61 @@ function populateSelect(select, values, defaultLabel) {
 }
 
 function renderFilterOptions(rows) {
-  populateSelect(byId("assetFilter"), [...new Set(rows.map((row) => row.assetClass))], "Все классы");
   populateSelect(byId("currencyFilter"), [...new Set(rows.map((row) => row.currency))], "Все валюты");
+  renderScopeFilter();
+}
+
+/**
+ * The class list, with how many instruments and how much result each one carries, so
+ * the choice is made against the number it will change rather than blind.
+ */
+function renderScopeFilter() {
+  const rows = state.payload?.rows || [];
+  const universe = scopeUniverse();
+  const stats = new Map(universe.map((value) => [value, { count: 0, result: 0 }]));
+  for (const row of rows) {
+    const entry = stats.get(String(row.assetClass || "—"));
+    if (!entry) continue;
+    entry.count += 1;
+    entry.result += numberValue(row.totalResultUsd) || 0;
+  }
+  byId("assetScopeOptions").innerHTML = universe.map((value) => {
+    const entry = stats.get(value);
+    const checked = !state.assetScope.size || state.assetScope.has(value);
+    return `<label class="scope-option">
+      <input type="checkbox" value="${escapeHtml(value)}"${checked ? " checked" : ""} />
+      <span>${escapeHtml(ASSET_CLASS_LABELS[value] || value)}</span>
+      <b>${entry.count} · ${compactUsdFixed(entry.result)}</b>
+    </label>`;
+  }).join("");
+  const summary = byId("assetScopeSummary");
+  summary.textContent = scopeLabel();
+  summary.classList.toggle("is-narrowed", scopeNarrowed());
+  byId("assetScopeAll").hidden = !scopeNarrowed();
+}
+
+/** Reads the boxes, then redraws everything the scope reaches. */
+function applyScope() {
+  const boxes = [...byId("assetScopeOptions").querySelectorAll("input[type=checkbox]")];
+  const picked = boxes.filter((box) => box.checked).map((box) => box.value);
+  // Unchecking the last box would leave a page with nothing on it and no way back
+  // except the reset button, so an empty pick means every class, same as the default.
+  state.assetScope = new Set(picked.length && picked.length < boxes.length ? picked : []);
+  persistScope();
+  redrawScopedBlocks();
+}
+
+/** Everything the class selection is allowed to change, and nothing else. */
+function redrawScopedBlocks() {
+  const payload = state.payload;
+  if (!payload) return;
+  renderScopeFilter();
+  renderHero(payload);
+  prepareCharts(payload);
+  applyCollapsed();
+  renderCharts();
+  alignHeroSide();
+  renderRows();
 }
 
 function isOpen(row) {
@@ -1503,15 +1793,15 @@ function renderSortHeaders() {
 }
 
 function activeFilterCount() {
-  return ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]
+  return ["directionFilter", "currencyFilter", "profitFilter"]
     .filter((id) => byId(id).value).length
+    + (scopeNarrowed() ? 1 : 0)
     + (byId("searchInput").value.trim() ? 1 : 0)
     + (state.activeTab === "all" ? 0 : 1);
 }
 
 function filteredRows() {
   const search = byId("searchInput").value.trim().toLowerCase();
-  const asset = byId("assetFilter").value;
   const direction = byId("directionFilter").value;
   const currency = byId("currencyFilter").value;
   const profit = byId("profitFilter").value;
@@ -1519,7 +1809,7 @@ function filteredRows() {
     if (state.activeTab === "open" && !isOpen(row)) return false;
     if (state.activeTab === "closed" && isOpen(row)) return false;
     if (state.activeTab === "review" && row.status !== "REVIEW") return false;
-    if (asset && row.assetClass !== asset) return false;
+    if (!inScope(row)) return false;
     if (direction && row.direction !== direction) return false;
     if (currency && row.currency !== currency) return false;
     const result = numberValue(row.totalResultUsd) || 0;
@@ -1978,6 +2268,10 @@ function renderIssues(payload) {
 
 function renderDashboard(payload) {
   state.payload = payload;
+  scopeCache = null;
+  state.assetScope = storedScope();
+  // Before the first block reads it: the hero is drawn ahead of the filter control.
+  pruneScope();
   const version = Number(payload.schemaVersion);
   byId("schemaWarning").hidden = SUPPORTED_SCHEMA_VERSIONS.includes(version);
   if (!SUPPORTED_SCHEMA_VERSIONS.includes(version)) {
@@ -2153,19 +2447,28 @@ byId("searchInput").addEventListener("input", () => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
-["assetFilter", "directionFilter", "currencyFilter", "profitFilter"].forEach((id) => {
+["directionFilter", "currencyFilter", "profitFilter"].forEach((id) => {
   byId(id).addEventListener("change", renderRows);
 });
 
+byId("assetScopeOptions").addEventListener("change", applyScope);
+byId("assetScopeAll").addEventListener("click", () => {
+  state.assetScope = new Set();
+  persistScope();
+  redrawScopedBlocks();
+});
+
 byId("resetFilters").addEventListener("click", () => {
-  for (const id of ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]) {
+  for (const id of ["directionFilter", "currencyFilter", "profitFilter"]) {
     byId(id).value = "";
   }
+  state.assetScope = new Set();
+  persistScope();
   byId("searchInput").value = "";
   state.activeTab = "all";
   byId("quickTabs").querySelectorAll("button")
     .forEach((item) => item.classList.toggle("active", item.dataset.tab === "all"));
-  renderRows();
+  redrawScopedBlocks();
 });
 
 // Locking on tab-hide protects an unattended screen, but it also closes the dashboard
