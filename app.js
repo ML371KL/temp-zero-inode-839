@@ -10,6 +10,7 @@ import {
   divergingBars,
   escapeHtml,
   rankedBars,
+  rankedLayout,
   sharePercent,
   signedCompactUsd,
   splitMeter,
@@ -17,7 +18,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260727-6";
+} from "./charts.js?v=20260727-7";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -469,6 +470,7 @@ document.addEventListener("click", (event) => {
   else collapsed.add(key);
   storeCollapsed(collapsed);
   applyCollapsed();
+  alignHeroSide();
   // A chart drawn inside a hidden panel measured zero and fell back to 320 px, so
   // whatever was just revealed has to be redrawn at its real width.
   if (state.payload && !collapsed.has(key)) renderCharts();
@@ -1062,12 +1064,23 @@ function renderCharts() {
 
   const stripHost = visibleHost("classStrip");
   if (stripHost && allocation && allocation.bars.length) {
-    stripHost.innerHTML = `${stackedStrip(allocation.segments, hostWidth(stripHost), { height: 20, label: "Состав счёта по классам активов" })}
+    // The strip is drawn between the same two edges as the bars beneath it: the whole
+    // card then has one left edge and one right edge instead of a full-width rule over
+    // an indented list.
+    const stripWidth = hostWidth(stripHost);
+    const columns = rankedLayout(allocation.bars, stripWidth);
+    stripHost.innerHTML = `${stackedStrip(allocation.segments, stripWidth, {
+      height: 20,
+      left: columns.plotLeft,
+      span: columns.plotWidth,
+      label: "Состав счёта по классам активов",
+    })}
       <div class="legend">
         ${allocation.segments.map((segment) => `
           <span class="legend-item"><i class="legend-swatch series-${segment.slot}"></i>${escapeHtml(segment.label)}<b>${segment.display}</b></span>
         `).join("")}
       </div>`;
+    stripHost.querySelector(".legend").style.paddingLeft = `${columns.plotLeft}px`;
     const allocationHost = visibleHost("allocationChart");
     if (allocationHost) allocationHost.innerHTML = rankedBars(allocation.bars, hostWidth(allocationHost), {
       label: "Открытые позиции по рыночной стоимости",
@@ -1254,6 +1267,7 @@ window.addEventListener("resize", () => {
     resizeTimer = null;
     renderCharts();
     syncStickyOffsets();
+    alignHeroSide();
   }, 160);
 });
 
@@ -1778,6 +1792,50 @@ function renderRows() {
  * Published as a custom property through CSSOM, which the page's CSP allows where a
  * style attribute would be dropped.
  */
+/**
+ * The account-composition card is centred on the same line the figure's leading "+"
+ * sits on. Nothing in CSS can express "line this box up with that glyph", so it is
+ * measured and applied as padding above the column; the verdict card stays pinned to
+ * the bottom, so only the meter moves.
+ */
+function alignHeroSide() {
+  const side = document.querySelector(".hero-side");
+  const figure = document.querySelector(".hero-figure");
+  const meter = document.querySelector(".hero-meter");
+  const main = document.querySelector(".hero-main");
+  if (!side || !figure || !meter || !main) return;
+  side.style.paddingTop = "0px";
+  // Stacked (one column) or folded: there is no second column to line anything up with.
+  if (byId("heroPanel").classList.contains("is-collapsed")
+    || Math.abs(side.getBoundingClientRect().left - main.getBoundingClientRect().left) < 4) return;
+
+  const probe = document.createElement("i");
+  probe.style.display = "inline-block";
+  probe.style.width = "0px";
+  probe.style.height = "0px";
+  figure.append(probe);
+  const baseline = probe.getBoundingClientRect().top;
+  probe.remove();
+  const style = getComputedStyle(figure);
+  const context = (alignHeroSide.canvas || (alignHeroSide.canvas = document.createElement("canvas")))
+    .getContext("2d");
+  context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const plus = context.measureText("+");
+  const plusY = baseline - (plus.actualBoundingBoxAscent - plus.actualBoundingBoxDescent) / 2;
+
+  const box = meter.getBoundingClientRect();
+  const delta = plusY - (box.top + box.height / 2);
+  // Only ever downwards, and only into the slack the column already has: the verdict
+  // card is pinned to the bottom, so the room to move is the gap between the two cards
+  // less the gap they are supposed to keep. The column itself is stretched to the row
+  // height, so its own height says nothing about how much slack is inside it.
+  const verdict = side.querySelector(".hero-check");
+  const gap = parseFloat(getComputedStyle(side).rowGap) || 12;
+  const room = verdict ? verdict.getBoundingClientRect().top - box.bottom - gap : 0;
+  const shift = Math.max(0, Math.min(Math.round(delta), Math.floor(room)));
+  if (shift > 0) side.style.paddingTop = `${shift}px`;
+}
+
 function syncStickyOffsets() {
   const wrap = document.querySelector(".table-wrap");
   if (!wrap || wrap.clientWidth <= 0) return;
@@ -1932,6 +1990,7 @@ function renderDashboard(payload) {
   // rather than drawn at full width and then folded away.
   applyCollapsed();
   renderCharts();
+  alignHeroSide();
   renderFilterOptions(payload.rows || []);
   renderRows();
   renderIssues(payload);

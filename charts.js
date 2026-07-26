@@ -387,14 +387,35 @@ export function columnChart(items, width, options = {}) {
  * Ranked horizontal bars for magnitude. One series, therefore one colour for every
  * bar: darkening the big ones would burn the only free channel restating the length.
  */
+/** Where a ranked chart's three columns fall, so the strip above can share the edges. */
+export function rankedLayout(items, width, options = {}) {
+  const gutter = 12;
+  // Both side columns are measured, not guessed. A fifth of the card was reserved for
+  // labels that read "CHTR", which pushed the bars into the middle of the card and left
+  // a canyon between them and their values.
+  // Capped as a share of the card as well, so one long option symbol cannot drag the
+  // whole plot to the right; anything past the cap is truncated with an ellipsis.
+  const labelWidth = Math.min(
+    Math.round(width * 0.18),
+    Math.max(36, Math.ceil(Math.max(...items.map((item) => textWidth(item.label, LABEL_FONT)))) + 4),
+  );
+  const valueWidth = Math.min(
+    Math.round(width * 0.3),
+    Math.max(48, Math.ceil(Math.max(...items.map(
+      (item) => textWidth(item.display ?? compactUsdFixed(item.value), VALUE_FONT),
+    ))) + 8),
+  );
+  const plotLeft = labelWidth + gutter;
+  return {
+    gutter, labelWidth, valueWidth, plotLeft,
+    plotWidth: Math.max(40, width - plotLeft - valueWidth - gutter),
+  };
+}
+
 export function rankedBars(items, width, options = {}) {
   const rowHeight = options.rowHeight || 28;
   const barHeight = 10;
-  const labelWidth = Math.min(150, Math.max(84, Math.round(width * 0.2)));
-  const valueWidth = options.valueWidth || 132;
-  const gutter = 12;
-  const plotLeft = labelWidth + gutter;
-  const plotWidth = Math.max(40, width - plotLeft - valueWidth - gutter);
+  const { labelWidth, valueWidth, plotLeft, plotWidth } = rankedLayout(items, width, options);
   const height = items.length * rowHeight + 6;
   const max = Math.max(...items.map((item) => Math.abs(item.value)), 1);
 
@@ -409,7 +430,7 @@ export function rankedBars(items, width, options = {}) {
     markup += `<rect class="chart-hit" x="0" y="${top - 3}" width="${width}" height="${rowHeight}" />`;
     markup += `<text class="chart-label" x="${labelWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(label)}</text>`;
     markup += `<path class="chart-bar" d="${barPath(plotLeft, y, barWidth, barHeight, 4, "right")}" />`;
-    markup += `<text class="chart-value" x="${width - 2}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(value)}</text>`;
+    markup += `<text class="chart-value" x="${plotLeft + plotWidth + valueWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(value)}</text>`;
     markup += `<title>${escapeHtml(`${item.label}: ${value}`)}</title>`;
     markup += `</g>`;
   });
@@ -465,9 +486,13 @@ export function divergingBars(items, width, options = {}) {
 export function stackedStrip(segments, width, options = {}) {
   const height = options.height || 14;
   const gap = 3;
+  // Drawn between the same two edges as the bars below when an inset is given, so the
+  // card reads as one composition instead of a full-width rule over an indented list.
+  const left = options.left || 0;
+  const span = options.span || width;
   const total = segments.reduce((sum, segment) => sum + Math.abs(segment.value), 0) || 1;
-  const usable = Math.max(10, width - gap * Math.max(0, segments.length - 1));
-  let cursor = 0;
+  const usable = Math.max(10, span - gap * Math.max(0, segments.length - 1));
+  let cursor = left;
   let markup = svgOpen(width, height, options.label || "Состав");
   segments.forEach((segment, index) => {
     const segmentWidth = Math.max(3, (Math.abs(segment.value) / total) * usable);
