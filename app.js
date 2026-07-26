@@ -1037,11 +1037,23 @@ function realisedTimeline(payload) {
 
   for (const row of scopedRows()) {
     for (const cycle of row.cycles || []) {
-      const realized = numberValue(cycle.realizedPnlUsd) || 0;
-      if (realized) {
-        const exits = (cycle.trades || []).filter((trade) => trade.action === "EXIT");
-        const at = cycle.closedAt || exits[exits.length - 1]?.timestamp || cycle.openedAt;
-        add(timeValue(at), realized);
+      // Each sale is dated by the day it happened. Hanging a cycle's whole result on
+      // the day it finally closed moved real money between calendar years — a position
+      // sold down across 2023, 2024 and 2025 counted entirely in 2025, and the yearly
+      // columns were out by tens of thousands even though the total was right.
+      const dated = (cycle.trades || []).filter((trade) => trade.realizedUsd != null);
+      if (dated.length) {
+        for (const trade of dated) {
+          add(timeValue(trade.timestamp), numberValue(trade.realizedUsd) || 0);
+        }
+      } else {
+        // A snapshot published before executions carried their own result.
+        const realized = numberValue(cycle.realizedPnlUsd) || 0;
+        if (realized) {
+          const exits = (cycle.trades || []).filter((trade) => trade.action === "EXIT");
+          const at = cycle.closedAt || exits[exits.length - 1]?.timestamp || cycle.openedAt;
+          add(timeValue(at), realized);
+        }
       }
       for (const event of cycle.cashEvents || []) {
         if (!["DIVIDEND", "WITHHOLDING_TAX", "FEE"].includes(String(event.category || ""))) continue;
@@ -1359,8 +1371,8 @@ function prepareCharts(payload) {
   state.timelineCoverage = covered
     // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
     // which position earned it; the payment can land weeks later and in another year.
-    // The note used to say "по дате выплаты" and described the wrong column.
-    ? "Закрытые сделки — по дате закрытия цикла, дивиденды — по дате отсечки. Нереализованный P&L сюда не входит."
+    // Sales are dated individually, not at the close of the cycle they belong to.
+    ? "Каждая продажа — по своей дате, дивиденды — по дате отсечки. Нереализованный P&L сюда не входит."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
   updateTimelineNote();
 
