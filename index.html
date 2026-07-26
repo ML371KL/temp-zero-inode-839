@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#070e17" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
+    <title>Portfolio Ledger</title>
+    <!-- Inline so there is no extra request and no 404 on every load. `img-src` already
+         allows data: URIs, so this needs no change to the Content-Security-Policy. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230f1d2b'/%3E%3Cpath d='M4 17 L9 11 L13 14 L20 6' fill='none' stroke='%2383e0c1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="styles.css?v=20260726-2" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="Portfolio Ledger">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false"><path class="brand-mark-line" d="M3 17.5 L8.5 11 L13 14.5 L21 5.5" /><circle class="brand-mark-dot" cx="21" cy="5.5" r="2.2" /></svg>
+          </span>
+          <span class="brand-text">
+            <strong>Portfolio Ledger</strong>
+            <small>IBKR · encrypted locally</small>
+          </span>
+        </a>
+        <div class="top-actions">
+          <span id="refreshFeedback" class="refresh-feedback" role="status" aria-live="polite"></span>
+          <button id="themeButton" class="icon-button" type="button" title="Светлая или тёмная тема" aria-label="Переключить тему">
+            <span id="themeIcon" class="button-glyph" aria-hidden="true">◐</span><span id="themeLabel" class="desktop-label">Тема</span>
+          </button>
+          <button id="refreshButton" class="icon-button" type="button" title="Обновить данные" hidden>
+            <span class="button-glyph refresh-icon" aria-hidden="true">↻</span><span id="refreshButtonLabel" class="desktop-label">Обновить</span>
+          </button>
+          <button id="lockButton" class="icon-button" type="button" title="Заблокировать" hidden>
+            <span class="button-glyph" aria-hidden="true">⌾</span><span class="desktop-label">Закрыть</span>
+          </button>
+        </div>
+      </header>
+
+      <section id="unlockView" class="unlock-layout" aria-labelledby="unlockTitle">
+        <div class="intro-copy">
+          <p class="eyebrow">PRIVATE PORTFOLIO</p>
+          <h1 id="unlockTitle">Весь журнал сделок.<br /><em>Только для вас.</em></h1>
+          <p class="intro-text">
+            Данные зашифрованы до публикации. Пароль обрабатывается только на этом устройстве
+            и никогда не отправляется на GitHub или другой сервер.
+          </p>
+          <div class="security-note">
+            <span class="security-dot" aria-hidden="true"></span>
+            AES-256-GCM · PBKDF2 · read-only
+          </div>
+        </div>
+
+        <form id="unlockForm" class="unlock-card">
+          <div class="lock-glyph" aria-hidden="true">⌾</div>
+          <h2>Открыть портфель</h2>
+          <p>Введите пароль, установленный в секретах приватного репозитория.</p>
+          <label for="passwordInput">Пароль</label>
+          <div class="password-field">
+            <input id="passwordInput" name="password" type="password" autocomplete="current-password" required />
+            <button id="togglePassword" type="button" aria-label="Показать или скрыть пароль">Показать</button>
+          </div>
+          <label class="remember-row">
+            <input id="rememberDevice" type="checkbox" />
+            <span>
+              <strong>Запомнить это устройство</strong>
+              <small>Ключ останется в защищённом хранилище этого браузера.</small>
+            </span>
+          </label>
+          <button id="unlockButton" class="primary-button" type="submit">
+            <span>Расшифровать</span><span aria-hidden="true">→</span>
+          </button>
+          <p id="unlockMessage" class="form-message" role="status"></p>
+          <button id="retryLoad" class="secondary-button" type="button" hidden>Повторить загрузку</button>
+        </form>
+      </section>
+
+      <section id="dashboardView" hidden>
+        <div id="dataStatus" class="data-status"></div>
+        <div id="schemaWarning" class="schema-warning" role="status" hidden></div>
+
+        <!-- Итог счёта: одна главная цифра и из чего она состоит -->
+        <section id="heroPanel" class="hero-panel" data-collapse="hero" aria-label="Итог счёта"></section>
+
+        <section id="buildupPanel" class="panel chart-panel" data-collapse="buildup" aria-labelledby="buildupTitle" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2 id="buildupTitle">Из чего сложился результат</h2>
+              <p>Каждый вклад в итог за всё время, от первой сделки до сегодняшнего дня</p>
+            </div>
+            <div class="panel-tools">
+              <button id="buildupTableToggle" class="ghost-button" type="button" aria-expanded="true">Графиком</button>
+              <button class="collapse-toggle" type="button" data-collapse-for="buildup" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div id="buildupChart" class="chart-host" hidden></div>
+            <div id="buildupTable" class="chart-table"></div>
+          </div>
+        </section>
+
+        <div class="panel-row">
+          <section id="timelinePanel" class="panel chart-panel" data-collapse="timeline" aria-labelledby="timelineTitle" hidden>
+            <div class="panel-heading">
+              <div>
+                <h2 id="timelineTitle">Результат нарастающим итогом</h2>
+                <p id="timelineNote">Закрытые сделки и дивиденды по датам, когда они случились</p>
+              </div>
+              <div class="panel-tools">
+                <div id="timelineMode" class="segmented" role="group" aria-label="Единицы измерения">
+                  <button type="button" data-mode="absolute" class="active">$</button>
+                  <button type="button" data-mode="percent">%</button>
+                </div>
+                <button class="collapse-toggle" type="button" data-collapse-for="timeline" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div id="timelineChart" class="chart-host"></div>
+              <div id="yearChart" class="chart-host chart-host-secondary"></div>
+            </div>
+          </section>
+
+          <section id="allocationPanel" class="panel chart-panel" data-collapse="allocation" aria-labelledby="allocationTitle" hidden>
+            <div class="panel-heading">
+              <div>
+                <h2 id="allocationTitle">Куда вложены деньги сейчас</h2>
+                <p id="allocationNote">Открытые позиции по рыночной стоимости</p>
+              </div>
+              <div class="panel-tools"><button class="collapse-toggle" type="button" data-collapse-for="allocation" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button></div>
+            </div>
+            <div class="panel-body">
+              <div id="classStrip" class="chart-host chart-host-strip"></div>
+              <div id="allocationChart" class="chart-host"></div>
+            </div>
+          </section>
+        </div>
+
+        <section id="extremesPanel" class="panel chart-panel" data-collapse="extremes" aria-labelledby="extremesTitle" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2 id="extremesTitle">Что заработало и что потеряло</h2>
+              <p>Итог по инструменту за всё время: реализованное, нереализованное и дивиденды вместе</p>
+            </div>
+            <div class="panel-tools"><button class="collapse-toggle" type="button" data-collapse-for="extremes" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button></div>
+          </div>
+          <div class="panel-body">
+            <div id="extremesChart" class="chart-host"></div>
+          </div>
+        </section>
+
+        <section id="accountPanel" class="panel account-panel" data-collapse="account" aria-labelledby="accountTitle" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2 id="accountTitle">Сходится ли со счётом</h2>
+              <p>Стоимость активов плюс кэш минус внесённое — против суммы компонентов</p>
+            </div>
+            <div class="panel-tools"><button class="collapse-toggle" type="button" data-collapse-for="account" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button></div>
+          </div>
+          <div id="accountIdentity" class="panel-body"></div>
+        </section>
+
+        <section class="panel portfolio-panel" aria-labelledby="instrumentsTitle">
+          <div class="panel-heading">
+            <div>
+              <h2 id="instrumentsTitle">Инструменты</h2>
+              <p id="resultCount">—</p>
+            </div>
+            <div class="search-wrap">
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Тикер, компания, Conid…" />
+            </div>
+          </div>
+
+          <div class="filter-bar">
+            <div id="quickTabs" class="quick-tabs" role="tablist">
+              <button type="button" data-tab="all" class="active">Все</button>
+              <button type="button" data-tab="open">Открытые</button>
+              <button type="button" data-tab="closed">Закрытые</button>
+              <button type="button" data-tab="review">Проверить</button>
+            </div>
+            <div class="select-filters">
+              <select id="assetFilter" aria-label="Класс актива"><option value="">Все классы</option></select>
+              <select id="directionFilter" aria-label="Направление">
+                <option value="">Long + Short</option><option value="LONG">Long</option><option value="SHORT">Short</option>
+              </select>
+              <select id="currencyFilter" aria-label="Валюта"><option value="">Все валюты</option></select>
+              <select id="profitFilter" aria-label="Результат">
+                <option value="">Любой результат</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
+              </select>
+              <button id="resetFilters" class="ghost-button" type="button" hidden>Сбросить</button>
+            </div>
+          </div>
+
+          <!-- Итоги считаются по видимым строкам: заголовок печатает, что именно попало в срез -->
+          <div class="kpi-heading">
+            <span>Итоги по выбранным инструментам</span>
+            <strong id="kpiContext" aria-live="polite">Все инструменты</strong>
+          </div>
+          <section id="kpiGrid" class="kpi-grid" aria-label="Ключевые показатели"></section>
+          <div id="totalsCheck" class="issues-list totals-check" role="status" hidden></div>
+
+          <div class="table-wrap">
+            <table>
+              <colgroup>
+                <col class="column-instrument" /><col class="column-currency" /><col class="column-status" />
+                <col class="column-cycle" /><col class="column-quantity" /><col class="column-entry" />
+                <col class="column-exit" /><col class="column-price" /><col class="column-money" />
+                <col class="column-money" /><col class="column-money" /><col class="column-money" />
+                <col class="column-total" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="instrument">Инструмент <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="currency">Валюта <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="status">Статус <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th aria-sort="none"><button class="sort-button" type="button" data-sort="cycle">Цикл <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="quantity">Количество <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageEntry">Средний вход, AVCO <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="averageExit">Средний выход (закр.) <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="currentPrice">Текущая цена <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="marketValueUsd">Стоимость, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="unrealizedPnlUsd">Нереализ., USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="realizedPnlUsd">Реализ., USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="dividendsNetUsd">Дивиденды net, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                  <th class="numeric" aria-sort="none"><button class="sort-button" type="button" data-sort="totalResultUsd">Итого, USD <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+                </tr>
+              </thead>
+              <tbody id="portfolioBody"></tbody>
+            </table>
+          </div>
+          <div id="emptyState" class="empty-state" hidden>По выбранным фильтрам ничего не найдено.</div>
+        </section>
+
+        <section id="issuesPanel" class="panel issues-panel" data-collapse="issues" hidden>
+          <div class="panel-heading"><div><h2>Требуют внимания</h2><p>IBKR-сверка и необработанные события</p></div><div class="panel-tools"><button class="collapse-toggle" type="button" data-collapse-for="issues" aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button></div></div>
+          <div id="issuesList" class="issues-list"></div>
+        </section>
+
+        <footer class="page-footer">
+          <p class="footer-note">
+            <span class="footer-dot" aria-hidden="true"></span>
+            Расшифровано локально · пароль не покидает устройство
+          </p>
+          <div class="footer-controls">
+            <label class="footer-toggle">
+              <input id="lockOnHide" type="checkbox" />
+              <span>Блокировать при сворачивании</span>
+            </label>
+            <button id="forgetDevice" class="ghost-button" type="button">Забыть это устройство</button>
+          </div>
+        </footer>
+      </section>
+    </main>
+
+    <div id="chartTooltip" class="chart-tooltip" role="tooltip" hidden></div>
+
+    <script type="module" src="app.js?v=20260726-2"></script>
+  </body>
+</html>

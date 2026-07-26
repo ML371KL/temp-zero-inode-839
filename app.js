@@ -1,0 +1,2134 @@
+"use strict";
+
+import {
+  areaChart,
+  areaGeometry,
+  chartTable,
+  columnChart,
+  compactUsd,
+  divergingBars,
+  escapeHtml,
+  rankedBars,
+  sharePercent,
+  signedCompactUsd,
+  splitMeter,
+  stackedStrip,
+  waterfall,
+// Versioned like the <script> and <link> tags in index.html: without it a change to
+// this module alone would keep being served from cache.
+} from "./charts.js?v=20260726-2";
+
+const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
+const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
+// A saved key is a standing grant of access to the whole portfolio from this browser
+// profile. It expires so that a device left behind stops being a key eventually.
+const DEVICE_KEY_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const SEARCH_DEBOUNCE_MS = 200;
+
+const state = {
+  envelope: null,
+  payload: null,
+  cryptoKey: null,
+  activeTab: "all",
+  expanded: new Set(),
+  sortKey: null,
+  sortDirection: null,
+  refreshTimer: null,
+  searchTimer: null,
+  alertDrafts: new Map(),
+  charts: new Map(),
+  // The table is the default: it is the exact statement of what the number is made
+  // of, and the chart is the illustration of it.
+  buildupAsTable: true,
+  timelineMode: "absolute",
+};
+
+const byId = (id) => document.getElementById(id);
+const unlockView = byId("unlockView");
+const dashboardView = byId("dashboardView");
+const unlockForm = byId("unlockForm");
+const passwordInput = byId("passwordInput");
+const unlockButton = byId("unlockButton");
+const unlockMessage = byId("unlockMessage");
+const rememberDevice = byId("rememberDevice");
+const portfolioBody = byId("portfolioBody");
+
+function bytesFromBase64(value) {
+  const binary = atob(value);
+  // A preallocated loop rather than Uint8Array.from with a callback: the callback
+  // form was the single slowest step in unlocking, well ahead of key derivation.
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function inflate(bytes) {
+  if (typeof DecompressionStream !== "function") {
+    throw new Error("Этот браузер не умеет распаковывать gzip. Обновите браузер.");
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function keyId(envelope) {
+  return `${envelope.kdf.salt}:${envelope.kdf.iterations}:${envelope.kdf.hash}`;
+}
+
+async function deriveKey(password, envelope) {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: bytesFromBase64(envelope.kdf.salt),
+      iterations: envelope.kdf.iterations,
+      hash: envelope.kdf.hash,
+    },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"],
+  );
+}
+
+async function decryptEnvelope(envelope, key) {
+  const decrypted = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: bytesFromBase64(envelope.cipher.iv),
+      additionalData: bytesFromBase64(envelope.cipher.aad),
+      tagLength: 128,
+    },
+    key,
+    bytesFromBase64(envelope.ciphertext),
+  );
+  const body = String(envelope.compression || "none") === "gzip"
+    ? await inflate(new Uint8Array(decrypted))
+    : new Uint8Array(decrypted);
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
+function openKeyDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("portfolio-ledger-keys", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("keys", { keyPath: "id" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function withKeyStore(mode, operation) {
+  const database = await openKeyDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction("keys", mode);
+      const request = operation(transaction.objectStore("keys"));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function saveDeviceKey(envelope, key) {
+  await withKeyStore("readwrite", (store) => store.put({
+    id: keyId(envelope),
+    key,
+    savedAt: new Date().toISOString(),
+  }));
+}
+
+async function loadDeviceKey(envelope) {
+  const record = await withKeyStore("readonly", (store) => store.get(keyId(envelope)));
+  if (!record?.key) {
+    // A miss means the envelope's salt or iteration count changed, so every stored
+    // key is now undecryptable dead weight. Leaving them would accumulate usable key
+    // material for old payloads on the device, one per change, forever.
+    await forgetDeviceKeys();
+    return null;
+  }
+  const savedAt = Date.parse(record.savedAt || "");
+  if (!Number.isFinite(savedAt) || Date.now() - savedAt > DEVICE_KEY_MAX_AGE_MS) {
+    await forgetDeviceKeys();
+    return null;
+  }
+  return record.key;
+}
+
+async function forgetDeviceKeys() {
+  await withKeyStore("readwrite", (store) => store.clear());
+}
+
+async function loadEnvelope({ bypassCache = false } = {}) {
+  // The initial load may come from the HTTP cache; an explicit refresh must not.
+  const response = await fetch("data/portfolio.enc", {
+    cache: bypassCache ? "reload" : "default",
+  });
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error("Данные ещё не опубликованы. Сначала запустите workflow в приватном репозитории.");
+    }
+    throw new Error(`Не удалось загрузить зашифрованные данные (${response.status}).`);
+  }
+  const envelope = await response.json();
+  if (envelope.format !== "ibkr-portfolio-aes-gcm"
+    || !SUPPORTED_ENVELOPE_VERSIONS.includes(envelope.version)) {
+    throw new Error("Неподдерживаемый формат зашифрованных данных.");
+  }
+  state.envelope = envelope;
+  return envelope;
+}
+
+function numberValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  // Negative zero is arithmetically zero but prints as "-0,00 $", which reads as a
+  // real charge of nothing and made a zero tax line look like a mistake.
+  return Object.is(parsed, -0) ? 0 : parsed;
+}
+
+// Intl formatters are expensive to build and were being rebuilt thousands of times
+// per render, which was the actual cause of the sluggish filtering.
+const numberFormatters = new Map();
+const moneyFormatters = new Map();
+
+function numberFormatter(maximumFractionDigits, minimumFractionDigits = 0) {
+  const key = `${maximumFractionDigits}:${minimumFractionDigits}`;
+  if (!numberFormatters.has(key)) {
+    numberFormatters.set(key, new Intl.NumberFormat("ru-RU", {
+      maximumFractionDigits,
+      minimumFractionDigits,
+    }));
+  }
+  return numberFormatters.get(key);
+}
+
+function moneyFormatter(currency, showCode) {
+  const key = `${currency}:${showCode}`;
+  if (!moneyFormatters.has(key)) {
+    let formatter;
+    try {
+      formatter = new Intl.NumberFormat("ru-RU", {
+        style: "currency",
+        currency,
+        currencyDisplay: showCode ? "code" : "narrowSymbol",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    } catch {
+      formatter = null;
+    }
+    moneyFormatters.set(key, formatter);
+  }
+  return moneyFormatters.get(key);
+}
+
+function formatNumber(value, maximumFractionDigits = 4) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  return numberFormatter(maximumFractionDigits).format(parsed);
+}
+
+/**
+ * Money is always shown with its currency spelled out unless it is the base currency.
+ * A narrow symbol renders USD, CAD and AUD all as "$", which makes three different
+ * amounts look like the same one.
+ */
+function formatMoney(value, currency = "USD", showCode = null) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  const code = String(currency || "USD").toUpperCase();
+  const withCode = showCode === null ? code !== "USD" : showCode;
+  const formatter = moneyFormatter(code, withCode);
+  if (!formatter) return `${formatNumber(parsed, 2)} ${code}`;
+  return formatter.format(parsed);
+}
+
+function formatUsd(value) {
+  return formatMoney(value, "USD", false);
+}
+
+/**
+ * Inside the table the five money columns already say USD in their headers, so the
+ * symbol is dropped there and only there: repeated 253 times down five columns it
+ * was pure noise competing with the digits it sat next to.
+ */
+function formatUsdCell(value) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  return numberFormatter(2, 2).format(parsed);
+}
+
+function formatSignedUsd(value) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  return parsed > 0 ? `+${formatUsd(parsed)}` : formatUsd(parsed);
+}
+
+/**
+ * Commissions and transaction taxes are stored as signed costs, where a charge is
+ * positive. Shown that way they read as income, so they are negated for display.
+ */
+function formatCost(value) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  return formatUsd(-parsed || 0);
+}
+
+function formatPercent(value, digits = 2) {
+  const parsed = numberValue(value);
+  if (parsed === null) return "—";
+  return `${numberFormatter(digits).format(parsed * 100)} %`;
+}
+
+const dateFormatters = new Map();
+
+function dateFormatter(includeTime, timeZone) {
+  const key = `${includeTime}:${timeZone || "local"}`;
+  if (!dateFormatters.has(key)) {
+    dateFormatters.set(key, new Intl.DateTimeFormat("ru-RU", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      ...(includeTime ? { hour: "2-digit", minute: "2-digit" } : {}),
+      ...(timeZone ? { timeZone } : {}),
+    }));
+  }
+  return dateFormatters.get(key);
+}
+
+const ZONED = /(?:Z|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * Real instants are shown in the viewer's own timezone.
+ *
+ * Flex trade times are the exception: they carry no offset because they are wall-clock
+ * in the report's configured timezone. Those are printed exactly as reported, since
+ * converting a time whose zone is unknown would move it by an arbitrary amount.
+ */
+function formatDate(value, includeTime = false) {
+  if (!value) return "—";
+  const text = String(value);
+  if (!ZONED.test(text)) {
+    // No offset: render the wall clock as the broker stated it.
+    const naive = new Date(`${text}Z`);
+    if (Number.isNaN(naive.getTime())) return escapeHtml(text);
+    return dateFormatter(includeTime, "UTC").format(naive);
+  }
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return escapeHtml(text);
+  return dateFormatter(includeTime, undefined).format(parsed);
+}
+
+const shortDateFormatters = new Map();
+
+function shortDateFormatter(pattern, timeZone) {
+  const key = `${pattern}:${timeZone || "local"}`;
+  if (!shortDateFormatters.has(key)) {
+    shortDateFormatters.set(key, new Intl.DateTimeFormat("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      ...(pattern === "date" ? { year: "2-digit" } : { hour: "2-digit", minute: "2-digit" }),
+      ...(timeZone ? { timeZone } : {}),
+    }));
+  }
+  return shortDateFormatters.get(key);
+}
+
+/**
+ * The compact form used inside table cells, where "09 окт. 2023 г." spent a third
+ * of the column on the word "г." and pushed the rest of the cycle out of view.
+ * The timezone rule is the same one `formatDate` follows.
+ */
+function formatDateShort(value, pattern = "date") {
+  if (!value) return "—";
+  const text = String(value);
+  const zoned = ZONED.test(text);
+  const parsed = new Date(zoned ? text : `${text}Z`);
+  if (Number.isNaN(parsed.getTime())) return escapeHtml(text);
+  return shortDateFormatter(pattern, zoned ? undefined : "UTC").format(parsed);
+}
+
+/** Milliseconds for a payload timestamp, zoned or naive, or null. */
+function timeValue(value) {
+  if (!value) return null;
+  const text = String(value);
+  const parsed = Date.parse(ZONED.test(text) ? text : `${text}Z`);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pnlClass(value) {
+  const parsed = numberValue(value);
+  if (parsed === null || parsed === 0) return "muted-value";
+  return parsed > 0 ? "positive" : "negative";
+}
+
+/* ------------------------------------------------------------------ theme --- */
+
+const THEME_KEY = "portfolio-ledger:theme";
+
+function storedTheme() {
+  try {
+    return window.localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") {
+    root.setAttribute("data-theme", theme);
+  } else {
+    root.removeAttribute("data-theme");
+  }
+  const dark = theme === "dark" || (theme !== "light"
+    && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  byId("themeIcon").textContent = dark ? "☾" : "☀";
+  byId("themeLabel").textContent = dark ? "Тёмная" : "Светлая";
+  document.querySelector('meta[name="theme-color"]')
+    ?.setAttribute("content", dark ? "#070e17" : "#f2f5f8");
+  return dark;
+}
+
+applyTheme(storedTheme());
+
+byId("themeButton").addEventListener("click", () => {
+  const next = applyTheme(storedTheme()) ? "light" : "dark";
+  try {
+    window.localStorage.setItem(THEME_KEY, next);
+  } catch {
+    /* private mode: the choice simply does not persist */
+  }
+  applyTheme(next);
+  if (state.payload) renderCharts();
+});
+
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (!storedTheme()) applyTheme(null);
+});
+
+/* ------------------------------------------------------------- collapsing --- */
+
+// The instrument table is the block the owner actually works in; everything above it
+// is context that can be folded away to a single strip. The choice is remembered,
+// because having to re-fold six panels on every visit is worse than not having the
+// control at all.
+const COLLAPSE_KEY = "portfolio-ledger:collapsed";
+const COLLAPSIBLE = ["hero", "buildup", "timeline", "allocation", "extremes", "account", "issues"];
+
+function collapsedSet() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(COLLAPSE_KEY) || "[]");
+    return new Set(Array.isArray(stored) ? stored.filter((key) => COLLAPSIBLE.includes(key)) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeCollapsed(keys) {
+  try {
+    window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...keys]));
+  } catch {
+    /* private mode: the choice simply does not persist */
+  }
+}
+
+function applyCollapsed() {
+  const collapsed = collapsedSet();
+  for (const key of COLLAPSIBLE) {
+    const section = document.querySelector(`[data-collapse="${key}"]`);
+    if (!section) continue;
+    const isCollapsed = collapsed.has(key);
+    section.classList.toggle("is-collapsed", isCollapsed);
+    const button = section.querySelector(`[data-collapse-for="${key}"]`);
+    if (button) {
+      button.setAttribute("aria-expanded", String(!isCollapsed));
+      button.firstElementChild.textContent = isCollapsed ? "+" : "−";
+      button.title = isCollapsed ? "Развернуть блок" : "Свернуть блок";
+    }
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-collapse-for]");
+  if (!button) return;
+  const key = button.dataset.collapseFor;
+  const collapsed = collapsedSet();
+  if (collapsed.has(key)) collapsed.delete(key);
+  else collapsed.add(key);
+  storeCollapsed(collapsed);
+  applyCollapsed();
+  // A chart drawn inside a hidden panel measured zero and fell back to 320 px, so
+  // whatever was just revealed has to be redrawn at its real width.
+  if (state.payload && !collapsed.has(key)) renderCharts();
+});
+
+/* --------------------------------------------------------------- totals ----- */
+
+const AGGREGATE_FIELDS = [
+  "marketValueUsd",
+  "openBasisUsd",
+  "unrealizedPnlUsd",
+  "realizedPnlUsd",
+  "dividendsNetUsd",
+  "otherFeesUsd",
+  "totalResultUsd",
+];
+
+function aggregateRows(rows) {
+  const totals = Object.fromEntries(AGGREGATE_FIELDS.map((field) => [field, 0]));
+  let partial = false;
+
+  for (const row of rows) {
+    for (const field of AGGREGATE_FIELDS) {
+      const value = numberValue(row[field]);
+      if (value !== null) totals[field] += value;
+    }
+    if (isOpen(row) && [row.marketValueUsd, row.openBasisUsd, row.unrealizedPnlUsd]
+      .some((value) => numberValue(value) === null)) {
+      partial = true;
+    }
+  }
+  return { totals, partial };
+}
+
+function filterContext(rows) {
+  const total = state.payload?.rows?.length || 0;
+  const tabLabels = { open: "Открытые", closed: "Закрытые", review: "Требуют проверки" };
+  const parts = [];
+  if (tabLabels[state.activeTab]) parts.push(tabLabels[state.activeTab]);
+  const search = byId("searchInput").value.trim();
+  if (search) parts.push(`поиск «${search}»`);
+  for (const id of ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]) {
+    const select = byId(id);
+    if (select.value) parts.push(select.selectedOptions[0]?.textContent || select.value);
+  }
+  return `${rows.length} из ${total}${parts.length ? ` · ${parts.join(" · ")}` : " · все инструменты"}`;
+}
+
+function isFiltered(rows) {
+  return rows.length !== (state.payload?.rows?.length || 0);
+}
+
+function renderKpis(payload, rows) {
+  const { totals, partial } = aggregateRows(rows);
+  const cards = [
+    ["Рыночная стоимость", totals.marketValueUsd, "Открытые позиции"],
+    ["Себестоимость, AVCO", totals.openBasisUsd, "По курсам на дату покупки"],
+    ["Нереализованный P&L", totals.unrealizedPnlUsd, "Текущий"],
+    ["Реализованный P&L", totals.realizedPnlUsd, "Закрытые объёмы"],
+    ["Чистые дивиденды", totals.dividendsNetUsd, "После налогов"],
+    ["Итог по инструментам", totals.totalResultUsd, "Без процентов и валютных конверсий"],
+  ];
+  byId("kpiContext").textContent = filterContext(rows);
+  byId("kpiGrid").innerHTML = cards.map(([label, value, note]) => `
+    <article class="kpi-card">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${label.includes("P&L") || label.includes("Итог") ? pnlClass(value) : ""}">${formatUsd(value)}</strong>
+      ${(note || partial) ? `<small>${escapeHtml(note)}${partial ? `${note ? " · " : ""}не хватает цен или курсов` : ""}</small>` : ""}
+    </article>
+  `).join("");
+  renderTotalsCheck(payload, rows, totals);
+}
+
+/**
+ * The cards deliberately reflect the active filter. That makes them impossible to
+ * compare against the payload totals unless nothing is filtered out — which is
+ * exactly when a mismatch would mean the frontend and the pipeline disagree.
+ */
+function renderTotalsCheck(payload, rows, totals) {
+  const banner = byId("totalsCheck");
+  if (isFiltered(rows)) {
+    banner.hidden = true;
+    return;
+  }
+  const published = payload.totals || {};
+  const drifted = AGGREGATE_FIELDS
+    .map((field) => {
+      const mine = totals[field];
+      const theirs = numberValue(published[field]);
+      if (theirs === null) return null;
+      return Math.abs(mine - theirs) > 0.01 ? { field, mine, theirs } : null;
+    })
+    .filter(Boolean);
+  banner.hidden = drifted.length === 0;
+  if (drifted.length) {
+    banner.innerHTML = drifted.map((item) => `
+      <div class="issue-item error">
+        <span class="severity">ERROR</span>
+        <span class="issue-type">${escapeHtml(item.field)}</span>
+        <span class="issue-message">Сумма по строкам ${formatUsd(item.mine)} не совпадает с опубликованным итогом ${formatUsd(item.theirs)}</span>
+      </div>
+    `).join("");
+  }
+}
+
+/* ------------------------------------------------------------------- hero --- */
+
+const IDENTITY_LABELS = {
+  BALANCED: ["ok", "Итог сходится со счётом"],
+  REVIEW: ["warning", "Итог почти сходится со счётом"],
+  MISMATCH: ["error", "Итог не сходится со счётом"],
+  INCOMPLETE: ["warning", "Итог проверить нельзя: не хватает данных"],
+  UNAVAILABLE: ["warning", "Итог проверить нельзя: нет отчёта по кэшу"],
+  // A payload published before the account blocks existed at all. Saying "нет отчёта
+  // по кэшу" here would send the owner to fix the Flex query, when what is actually
+  // stale is the snapshot.
+  NO_ACCOUNT_BLOCK: ["warning", "Данные счёта в этом снимке отсутствуют"],
+};
+
+const IDENTITY_HINTS = {
+  BALANCED: "разница укладывается в переоценку валютных остатков",
+  NO_ACCOUNT_BLOCK: "снимок опубликован до этой версии учёта — запустите синхронизацию",
+  UNAVAILABLE: "в Activity Flex нет секции Cash Report",
+};
+
+/**
+ * One number leads the page: what the account has earned since the first deposit.
+ * Everything beside it exists to say what that number is made of and how much of
+ * it can be trusted.
+ */
+function renderHero(payload) {
+  const identity = payload.accountIdentity || {};
+  const performance = payload.performance || {};
+  const allocation = payload.allocation || {};
+  const status = payload.status || {};
+  const rows = payload.rows || [];
+
+  const result = numberValue(identity.accountResultUsd);
+  const fallback = result === null ? numberValue(payload.totals?.totalResultUsd) : null;
+  const headline = result === null ? fallback : result;
+  const contributions = numberValue(identity.netContributionsUsd);
+  const returnOnMoney = contributions ? headline / Math.abs(contributions) : null;
+  const identityStatus = payload.accountIdentity ? identity.status : "NO_ACCOUNT_BLOCK";
+  const [tone, identityLabel] = IDENTITY_LABELS[identityStatus] || IDENTITY_LABELS.UNAVAILABLE;
+
+  // An older snapshot carries `cash` but none of the account blocks. Reading the
+  // balance from `cash` as well means the page shows what it has instead of a dash.
+  const marketValue = numberValue(identity.marketValueUsd)
+    ?? numberValue(payload.totals?.marketValueUsd) ?? 0;
+  const cash = numberValue(identity.endingCashUsd)
+    ?? (payload.cash?.available ? numberValue(payload.cash.endingCash) : null);
+  const netAssetValue = numberValue(identity.netAssetValueUsd)
+    ?? (cash === null ? null : marketValue + cash);
+  // With no cash report and nothing open there is no split to show, and a meter of
+  // one empty segment claims a composition the payload does not have.
+  const hasComposition = cash !== null || marketValue !== 0;
+  // Cash keeps slot 1 and instruments slot 2 here and in the asset-class strip, so
+  // the same thing is the same colour in both charts.
+  const meterSegments = cash === null
+    ? [{ label: "Позиции", value: marketValue, slot: 2, display: formatUsd(marketValue) }]
+    : [
+      { label: "Позиции", value: Math.max(0, marketValue), slot: 2, display: formatUsd(marketValue) },
+      { label: "Кэш", value: Math.max(0, cash), slot: 1, display: formatUsd(cash) },
+    ];
+
+  const openCount = Number(status.openPositionCount || rows.filter(isOpen).length);
+  // A dash says nothing about why. Where a figure is missing because the snapshot
+  // never carried it, the tile says which section of the report would supply it.
+  const missingHint = payload.accountIdentity
+    ? "нет событий Deposits/Withdrawals в Activity Flex"
+    : "нет в этом снимке — нужна свежая синхронизация";
+  const facts = [
+    ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
+      contributions === null ? missingHint : ""],
+    ["Сейчас на счёте", formatUsd(netAssetValue), "",
+      netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
+    ["Годовая доходность, XIRR", formatPercent(performance.moneyWeightedReturn),
+      pnlClass(performance.moneyWeightedReturn),
+      numberValue(performance.moneyWeightedReturn) === null ? missingHint : ""],
+    ["Открытых позиций", `${openCount} из ${rows.length}`, "", ""],
+  ];
+
+  byId("heroPanel").innerHTML = `
+    <button class="collapse-toggle hero-collapse" type="button" data-collapse-for="hero"
+      aria-label="Свернуть или развернуть блок"><span aria-hidden="true">−</span></button>
+    <div class="hero-main">
+      <p class="eyebrow">Заработано за всё время</p>
+      <p class="hero-figure ${pnlClass(headline)}">${formatSignedUsd(headline)}</p>
+      <p class="hero-sub">
+        ${returnOnMoney === null ? "" : `<span class="hero-badge ${pnlClass(returnOnMoney)}">${escapeHtml(returnOnMoney > 0 ? "+" : "")}${formatPercent(returnOnMoney, 1)} к внесённым деньгам</span>`}
+        ${performance.firstFundingAt ? `<span class="hero-note">с ${formatDate(performance.firstFundingAt)}</span>` : ""}
+      </p>
+      <div class="hero-facts">
+        ${facts.map(([label, value, valueTone, hint]) => `
+          <div${hint ? ` title="${escapeHtml(hint)}"` : ""}><span>${escapeHtml(label)}</span><strong class="${valueTone}">${value}</strong>${hint ? `<small>${escapeHtml(hint)}</small>` : ""}</div>
+        `).join("")}
+      </div>
+    </div>
+    <div class="hero-side">
+      ${hasComposition ? `<div class="hero-meter">
+        <div class="hero-meter-head">
+          <span>Из чего состоит счёт</span>
+          <strong>${formatUsd(netAssetValue)}</strong>
+        </div>
+        <div id="heroMeter" class="chart-host chart-host-strip" data-chart="meter"></div>
+        <div class="legend">
+          ${meterSegments.map((segment, index) => `
+            <span class="legend-item">
+              <i class="legend-swatch series-${segment.slot}"></i>
+              ${escapeHtml(segment.label)}
+              <b>${segment.display}</b>
+              ${index === 1 && allocation.cashShare != null ? `<em>${formatPercent(allocation.cashShare, 0)}</em>` : ""}
+            </span>
+          `).join("")}
+        </div>
+      </div>` : ""}
+      <div class="hero-check tone-${tone}">
+        <span class="hero-check-dot" aria-hidden="true"></span>
+        <span>
+          <strong>${escapeHtml(identityLabel)}</strong>
+          <small>${identity.differenceUsd == null
+            ? escapeHtml(IDENTITY_HINTS[identityStatus] || "сверка со счётом недоступна")
+            : `расхождение ${formatUsd(identity.differenceUsd)} при допуске ${formatUsd(identity.toleranceUsd)}`}</small>
+        </span>
+      </div>
+    </div>
+  `;
+  state.charts.set("meter", { segments: meterSegments });
+}
+
+/* ---------------------------------------------------------------- derived --- */
+
+/**
+ * What the lifetime result is made of, in the order the pipeline itself composes it:
+ * instruments first, then everything that never belonged to a position.
+ */
+function buildupItems(payload) {
+  const totals = payload.totals || {};
+  const accountCash = payload.accountCash || {};
+  const commissions = numberValue(totals.commissionsUsd);
+  const fxRealized = numberValue(totals.fxRealizedPnlUsd);
+  const items = [
+    {
+      label: "Реализованный P&L",
+      value: numberValue(totals.realizedPnlUsd) || 0,
+      note: [
+        commissions ? `комиссии уже вычтены: ${formatCost(commissions)}` : null,
+        fxRealized ? `валютная часть ${formatSignedUsd(fxRealized)}` : null,
+      ].filter(Boolean).join(" · "),
+    },
+    {
+      label: "Нереализованный P&L",
+      value: numberValue(totals.unrealizedPnlUsd) || 0,
+      note: "по последним известным ценам",
+    },
+    {
+      label: "Дивиденды net",
+      value: numberValue(totals.dividendsNetUsd) || 0,
+      note: `gross ${formatUsd(totals.dividendsGrossUsd)} · налог ${formatUsd(totals.withholdingTaxUsd)}`,
+    },
+  ];
+  const instrumentFees = numberValue(totals.instrumentFeesUsd);
+  if (instrumentFees) {
+    items.push({ label: "Сборы по инструментам", value: instrumentFees, note: "" });
+  }
+  items.push({ label: "Итог по инструментам", kind: "total", note: "сумма всех строк таблицы" });
+
+  const extras = [
+    ["Проценты брокера", accountCash.interestUsd, "начислены на остаток"],
+    ["Сборы по счёту", accountCash.accountFeesUsd, "подписки и обслуживание"],
+    ["Валютные конверсии", accountCash.currencyResultUsd, "результат обмена валют"],
+    ["Прочий кэш", accountCash.otherCashUsd, ""],
+    ["Неклассифицированный кэш", accountCash.unclassifiedCashUsd,
+      `${Number(accountCash.unclassifiedCashCount || 0)} событий`],
+  ];
+  let hasAccountLevel = false;
+  for (const [label, raw, note] of extras) {
+    const value = numberValue(raw);
+    if (value) {
+      items.push({ label, value, note });
+      hasAccountLevel = true;
+    }
+  }
+  // The second total only means something once something has been added after the
+  // first one. With no account-level components it repeats the line above it
+  // verbatim, and a table that states the same number twice reads like an error.
+  if (hasAccountLevel) {
+    items.push({
+      label: "Итог по счёту",
+      kind: "total",
+      note: "инструменты плюс то, что не принадлежит ни одной позиции",
+    });
+  }
+  return items;
+}
+
+/**
+ * Realised money on the date it was actually realised: a closed cycle's P&L at the
+ * moment it closed, a dividend on the day it was earned. Unrealised P&L is
+ * deliberately absent — it has no date, and pinning it to today would draw a jump
+ * that never happened.
+ */
+function realisedTimeline(payload) {
+  const buckets = new Map();
+  let dated = 0;
+  let undated = 0;
+
+  const add = (time, amount) => {
+    if (!amount) return;
+    if (time === null) {
+      undated += amount;
+      return;
+    }
+    const date = new Date(time);
+    const key = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+    buckets.set(key, (buckets.get(key) || 0) + amount);
+    dated += amount;
+  };
+
+  for (const row of payload.rows || []) {
+    for (const cycle of row.cycles || []) {
+      const realized = numberValue(cycle.realizedPnlUsd) || 0;
+      if (realized) {
+        const exits = (cycle.trades || []).filter((trade) => trade.action === "EXIT");
+        const at = cycle.closedAt || exits[exits.length - 1]?.timestamp || cycle.openedAt;
+        add(timeValue(at), realized);
+      }
+      for (const event of cycle.cashEvents || []) {
+        if (!["DIVIDEND", "WITHHOLDING_TAX", "FEE"].includes(String(event.category || ""))) continue;
+        add(timeValue(event.exDate || event.timestamp), numberValue(event.amountUsd) || 0);
+      }
+    }
+  }
+
+  const months = [...buckets.entries()].sort((left, right) => left[0] - right[0]);
+  const points = [];
+  let cumulative = 0;
+  for (const [time, amount] of months) {
+    cumulative += amount;
+    points.push({ time, value: cumulative, delta: amount });
+  }
+  if (points.length) {
+    // Start the line at zero one month before the first realisation, so the first
+    // month reads as a step up from nothing rather than as the baseline.
+    const first = new Date(points[0].time);
+    points.unshift({
+      time: Date.UTC(first.getUTCFullYear(), first.getUTCMonth() - 1, 1),
+      value: 0,
+      delta: 0,
+    });
+  }
+
+  const years = new Map();
+  for (const [time, amount] of months) {
+    const year = new Date(time).getUTCFullYear();
+    years.set(year, (years.get(year) || 0) + amount);
+  }
+
+  // The same curve read as a ratio: money earned per dollar that was in the account
+  // by that date. It needs dated funding, which older snapshots do not carry, so the
+  // percent view is offered only when the flows are actually there.
+  const flows = (payload.cashFlows || [])
+    .map((flow) => ({ time: timeValue(flow.timestamp), amount: numberValue(flow.amountUsd) || 0 }))
+    .filter((flow) => flow.time !== null)
+    .sort((left, right) => left.time - right.time);
+  for (const point of points) {
+    const month = new Date(point.time);
+    const monthEnd = Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 1);
+    let contributed = 0;
+    for (const flow of flows) {
+      if (flow.time >= monthEnd) break;
+      contributed += flow.amount;
+    }
+    point.contributed = contributed;
+    point.percent = contributed > 0 ? point.value / contributed : null;
+  }
+
+  const totals = payload.totals || {};
+  const expected = (numberValue(totals.realizedPnlUsd) || 0)
+    + (numberValue(totals.dividendsNetUsd) || 0)
+    + (numberValue(totals.instrumentFeesUsd) || 0);
+  return {
+    points,
+    percentPoints: points
+      .filter((point) => point.percent !== null)
+      .map((point) => ({ time: point.time, value: point.percent, delta: point.delta })),
+    percentAvailable: flows.length > 0 && points.some((point) => point.percent !== null),
+    years: [...years.entries()].sort((left, right) => left[0] - right[0])
+      .map(([year, value]) => ({ label: String(year), value })),
+    dated,
+    undated,
+    expected,
+  };
+}
+
+const ASSET_CLASS_LABELS = {
+  STK: "Акции и ETF",
+  OPT: "Опционы",
+  FUT: "Фьючерсы",
+  FOP: "Опционы на фьючерсы",
+  BOND: "Облигации",
+  FUND: "Фонды",
+  WAR: "Варранты",
+  CFD: "CFD",
+  CASH: "Валюта",
+};
+
+// Colour follows the entity, never its size: a class keeps its slot when the mix
+// changes, so a reader who learned "опционы оранжевые" stays right.
+const ASSET_CLASS_SLOTS = { CASH: 1, STK: 2, OPT: 3, FUT: 4, BOND: 5, FUND: 6, FOP: 7, WAR: 8, CFD: 8 };
+
+function allocationModel(payload) {
+  const open = (payload.rows || []).filter((row) => isOpen(row)
+    && numberValue(row.marketValueUsd) !== null);
+  const exposure = open.reduce((sum, row) => sum + Math.abs(numberValue(row.marketValueUsd)), 0);
+  const cash = numberValue(payload.allocation?.cashUsd);
+  // The signed market value, so positions and cash add up to the account total the
+  // way they do in the hero meter. Exposure counts a short twice over and belongs
+  // to the risk question, not to "where is the money".
+  const invested = numberValue(payload.allocation?.investedUsd)
+    ?? open.reduce((sum, row) => sum + numberValue(row.marketValueUsd), 0);
+  const base = numberValue(payload.allocation?.netAssetValueUsd) || (invested + (cash || 0));
+
+  const byClass = new Map();
+  for (const row of open) {
+    const key = String(row.assetClass || "—");
+    byClass.set(key, (byClass.get(key) || 0) + Math.abs(numberValue(row.marketValueUsd)));
+  }
+  const segments = [];
+  if (cash !== null && cash > 0) {
+    segments.push({ label: "Кэш", value: cash, slot: 1, display: formatUsd(cash) });
+  }
+  for (const [key, value] of [...byClass.entries()].sort((left, right) => right[1] - left[1])) {
+    segments.push({
+      label: ASSET_CLASS_LABELS[key] || key,
+      value,
+      slot: ASSET_CLASS_SLOTS[key] || 8,
+      display: formatUsd(value),
+    });
+  }
+
+  const ranked = open
+    .map((row) => ({
+      label: row.symbol || row.conid,
+      value: Math.abs(numberValue(row.marketValueUsd)),
+      note: row.instrument,
+      share: base ? Math.abs(numberValue(row.marketValueUsd)) / base : null,
+    }))
+    .sort((left, right) => right.value - left.value);
+  const shown = ranked.slice(0, 12);
+  const rest = ranked.slice(12);
+  if (rest.length) {
+    const value = rest.reduce((sum, item) => sum + item.value, 0);
+    shown.push({
+      label: `Ещё ${rest.length}`,
+      value,
+      note: "остальные открытые позиции",
+      share: base ? value / base : null,
+      muted: true,
+    });
+  }
+  return {
+    segments,
+    bars: shown.map((item) => ({
+      label: item.label,
+      value: item.value,
+      muted: item.muted,
+      note: item.note,
+      display: `${compactUsd(item.value)} · ${item.share === null ? "—" : sharePercent(item.share)}`,
+    })),
+    invested,
+    exposure,
+    base,
+  };
+}
+
+function extremeRows(payload) {
+  const scored = (payload.rows || [])
+    .map((row) => ({
+      label: row.symbol || row.conid,
+      value: numberValue(row.totalResultUsd),
+      note: row.instrument,
+    }))
+    .filter((item) => item.value !== null && item.value !== 0)
+    .sort((left, right) => right.value - left.value);
+  if (scored.length <= 14) return scored;
+  return [...scored.slice(0, 7), ...scored.slice(-7)];
+}
+
+/* ----------------------------------------------------------------- charts --- */
+
+/**
+ * The floor only exists so a container that is currently hidden does not produce a
+ * zero-width chart; it must stay below the narrowest real card, or a phone gets a
+ * chart wider than the card it sits in.
+ */
+function hostWidth(host) {
+  // Floor below the narrowest real host (about 196 px on a 320 px phone) so the
+  // minimum never becomes the thing that overflows the container.
+  return Math.max(180, Math.floor(host.getBoundingClientRect().width) || 180);
+}
+
+function renderCharts() {
+  const payload = state.payload;
+  if (!payload) return;
+
+  const items = buildupItems(payload);
+  const timeline = state.charts.get("timeline");
+  const allocation = state.charts.get("allocation");
+  const extremes = state.charts.get("extremes");
+
+  // Every panel's visibility is settled before anything is measured. Unhiding one
+  // panel of a two-column row changes the width of the other, so a chart drawn
+  // between the two calls was sized for a layout that no longer existed and
+  // overflowed its card.
+  byId("buildupPanel").hidden = items.length < 2;
+  byId("timelinePanel").hidden = !timeline || timeline.points.length < 2;
+  byId("allocationPanel").hidden = !allocation || !allocation.bars.length;
+  byId("extremesPanel").hidden = !extremes || extremes.length < 2;
+
+  const meter = state.charts.get("meter");
+  const meterHost = byId("heroMeter");
+  if (meter && meterHost) {
+    meterHost.innerHTML = splitMeter(meter.segments, hostWidth(meterHost), { height: 20 });
+  }
+
+  const buildupHost = byId("buildupChart");
+  buildupHost.innerHTML = waterfall(items, hostWidth(buildupHost));
+
+  const timelineHost = byId("timelineChart");
+  if (timeline && timeline.points.length >= 2) {
+    const percent = state.timelineMode === "percent" && timeline.percentAvailable;
+    const series = percent ? timeline.percentPoints : timeline.points;
+    const width = hostWidth(timelineHost);
+    timelineHost.innerHTML = areaChart(series, width, {
+      label: percent
+        ? "Реализованный результат к внесённым деньгам"
+        : "Реализованный результат нарастающим итогом",
+      height: 224,
+      format: percent ? (value) => sharePercent(value) : undefined,
+    });
+    state.charts.set("timelineGeometry", areaGeometry(series, width, { height: 224 }));
+    state.charts.set("timelineSeries", { points: series, percent });
+    const yearHost = byId("yearChart");
+    yearHost.innerHTML = columnChart(timeline.years, hostWidth(yearHost), {
+      label: "Результат по годам",
+    });
+  }
+
+  if (allocation && allocation.bars.length) {
+    const stripHost = byId("classStrip");
+    stripHost.innerHTML = `${stackedStrip(allocation.segments, hostWidth(stripHost), { height: 20, label: "Состав счёта по классам активов" })}
+      <div class="legend">
+        ${allocation.segments.map((segment) => `
+          <span class="legend-item"><i class="legend-swatch series-${segment.slot}"></i>${escapeHtml(segment.label)}<b>${segment.display}</b></span>
+        `).join("")}
+      </div>`;
+    const allocationHost = byId("allocationChart");
+    allocationHost.innerHTML = rankedBars(allocation.bars, hostWidth(allocationHost), {
+      label: "Открытые позиции по рыночной стоимости",
+    });
+  }
+
+  if (extremes && extremes.length >= 2) {
+    const extremesHost = byId("extremesChart");
+    extremesHost.innerHTML = divergingBars(extremes, hostWidth(extremesHost), {
+      label: "Итог по инструментам: лучшие и худшие",
+    });
+  }
+}
+
+function prepareCharts(payload) {
+  const timeline = realisedTimeline(payload);
+  state.charts.set("timeline", timeline);
+  state.charts.set("allocation", allocationModel(payload));
+  state.charts.set("extremes", extremeRows(payload));
+
+  const drift = timeline.expected - timeline.dated;
+  const note = byId("timelineNote");
+  const covered = Math.abs(timeline.expected) > 1
+    ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
+    : true;
+  note.textContent = covered
+    ? "Закрытые сделки — по дате закрытия цикла, дивиденды — по дате выплаты. Нереализованный P&L сюда не входит."
+    : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
+
+  // The percent view divides by dated funding. Offering the button when there is
+  // nothing to divide by would just produce an empty plot.
+  const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
+  percentButton.disabled = !timeline.percentAvailable;
+  percentButton.title = timeline.percentAvailable
+    ? "Реализованный результат к внесённым деньгам на ту же дату"
+    : "Недоступно: в снимке нет датированных внесений (Deposits/Withdrawals)";
+  if (!timeline.percentAvailable && state.timelineMode === "percent") {
+    state.timelineMode = "absolute";
+    byId("timelineMode").querySelectorAll("button")
+      .forEach((item) => item.classList.toggle("active", item.dataset.mode === "absolute"));
+  }
+
+  const allocation = state.charts.get("allocation");
+  byId("allocationNote").textContent = allocation.base
+    ? `Открытые позиции на ${formatUsd(allocation.invested)} — это ${sharePercent(allocation.invested / allocation.base)} счёта`
+    : "Открытые позиции по рыночной стоимости";
+
+  byId("buildupTable").innerHTML = chartTable(
+    buildupItems(payload).map((item, index, all) => {
+      let cumulative = 0;
+      for (let cursor = 0; cursor <= index; cursor += 1) {
+        if (all[cursor].kind !== "total") cumulative += all[cursor].value;
+      }
+      const value = item.kind === "total" ? cumulative : item.value;
+      return {
+        label: item.label,
+        value: formatUsd(value),
+        tone: item.kind === "total" ? "" : pnlClass(value),
+        kind: item.kind,
+      };
+    }),
+    { head: ["Составляющая", "Сумма, USD"] },
+  );
+}
+
+byId("timelineMode").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-mode]");
+  if (!button || button.disabled) return;
+  state.timelineMode = button.dataset.mode;
+  byId("timelineMode").querySelectorAll("button")
+    .forEach((item) => item.classList.toggle("active", item === button));
+  renderCharts();
+});
+
+byId("buildupTableToggle").addEventListener("click", (event) => {
+  state.buildupAsTable = !state.buildupAsTable;
+  byId("buildupTable").hidden = !state.buildupAsTable;
+  byId("buildupChart").hidden = state.buildupAsTable;
+  event.currentTarget.setAttribute("aria-expanded", String(state.buildupAsTable));
+  event.currentTarget.textContent = state.buildupAsTable ? "Графиком" : "Таблицей";
+});
+
+/* Tooltips: an enhancement over marks that already carry their value in a <title>
+   and in a direct label, never the only way to read a number. */
+const tooltip = byId("chartTooltip");
+
+function showTooltip(target, event) {
+  tooltip.innerHTML = `
+    <strong>${escapeHtml(target.dataset.tipTitle || "")}</strong>
+    <span>${escapeHtml(target.dataset.tipValue || "")}</span>
+    ${target.dataset.tipNote ? `<small>${escapeHtml(target.dataset.tipNote)}</small>` : ""}
+  `;
+  tooltip.hidden = false;
+  const box = tooltip.getBoundingClientRect();
+  const x = Math.min(Math.max(8, event.clientX + 14), window.innerWidth - box.width - 8);
+  const y = Math.max(8, event.clientY - box.height - 12);
+  tooltip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+}
+
+document.addEventListener("mousemove", (event) => {
+  const target = event.target.closest?.("[data-tip-title]");
+  if (!target) {
+    tooltip.hidden = true;
+    return;
+  }
+  showTooltip(target, event);
+});
+
+document.addEventListener("focusin", (event) => {
+  const target = event.target.closest?.("[data-tip-title]");
+  if (!target) return;
+  const box = target.getBoundingClientRect();
+  showTooltip(target, { clientX: box.left + box.width / 2, clientY: box.top + box.height });
+});
+
+document.addEventListener("focusout", () => { tooltip.hidden = true; });
+document.addEventListener("scroll", () => { tooltip.hidden = true; }, true);
+
+// The area chart has no per-point marks, so the nearest point is resolved from the
+// pointer position across the whole plot rather than from a hit target per month.
+byId("timelineChart").addEventListener("mousemove", (event) => {
+  const geometry = state.charts.get("timelineGeometry");
+  const series = state.charts.get("timelineSeries");
+  const svg = event.currentTarget.querySelector("svg");
+  if (!geometry || !series?.points?.length || !svg) return;
+  const box = svg.getBoundingClientRect();
+  const time = geometry.fromX(event.clientX - box.left);
+  let nearest = series.points[0];
+  for (const point of series.points) {
+    if (Math.abs(point.time - time) < Math.abs(nearest.time - time)) nearest = point;
+  }
+  const crosshair = svg.querySelector(".chart-crosshair");
+  const line = svg.querySelector(".chart-crosshair-line");
+  const dot = svg.querySelector(".chart-crosshair-dot");
+  const cx = geometry.toX(nearest.time);
+  const cy = geometry.toY(nearest.value);
+  crosshair.removeAttribute("hidden");
+  line.setAttribute("x1", cx);
+  line.setAttribute("x2", cx);
+  dot.setAttribute("cx", cx);
+  dot.setAttribute("cy", cy);
+  const month = new Date(nearest.time);
+  showTooltip({
+    dataset: {
+      tipTitle: `${monthLabel(month)}`,
+      tipValue: series.percent
+        ? `${sharePercent(nearest.value)} к внесённым деньгам`
+        : `Накоплено ${formatUsd(nearest.value)}`,
+      tipNote: nearest.delta ? `за месяц ${formatSignedUsd(nearest.delta)}` : "",
+    },
+  }, event);
+});
+
+byId("timelineChart").addEventListener("mouseleave", (event) => {
+  event.currentTarget.querySelector(".chart-crosshair")?.setAttribute("hidden", "");
+  tooltip.hidden = true;
+});
+
+const monthFormatter = new Intl.DateTimeFormat("ru-RU", { month: "long", year: "numeric", timeZone: "UTC" });
+
+function monthLabel(date) {
+  return monthFormatter.format(date);
+}
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (!state.payload) return;
+  if (resizeTimer) window.clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = null;
+    renderCharts();
+  }, 160);
+});
+
+/* ---------------------------------------------------------------- account --- */
+
+/**
+ * The instrument rows cannot answer "did the account really make this much": broker
+ * interest, account fees and currency conversions never belong to a position. This
+ * panel publishes the closing identity and everything the rows leave out.
+ */
+function renderAccountPanel(payload) {
+  const identity = payload.accountIdentity;
+  const accountCash = payload.accountCash || {};
+  const performance = payload.performance || {};
+  const panel = byId("accountPanel");
+  if (!identity) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const [tone, label] = IDENTITY_LABELS[identity.status] || IDENTITY_LABELS.UNAVAILABLE;
+  const notCounted = [
+    ["Проценты брокера", accountCash.interestUsd],
+    ["Сборы по счёту", accountCash.accountFeesUsd],
+    ["Результат валютных конверсий", accountCash.currencyResultUsd],
+    ["Прочий кэш", accountCash.otherCashUsd],
+    ["Неклассифицированный кэш", accountCash.unclassifiedCashUsd],
+  ].filter(([, value]) => numberValue(value) !== null && numberValue(value) !== 0);
+
+  // Two ways of arriving at the same number, printed side by side. They are the
+  // whole point of the panel, so they get the equation layout rather than a grid
+  // of equal-weight boxes where the reader has to find them.
+  const bridge = `
+    <div class="bridge">
+      <div class="bridge-line">
+        <span class="bridge-term"><small>Стоимость активов</small><b>${formatUsd(identity.marketValueUsd)}</b></span>
+        <span class="bridge-op" aria-hidden="true">+</span>
+        <span class="bridge-term"><small>Кэш</small><b>${formatUsd(identity.endingCashUsd)}</b></span>
+        <span class="bridge-op" aria-hidden="true">−</span>
+        <span class="bridge-term"><small>Внесено минус выведено</small><b>${formatUsd(identity.netContributionsUsd)}</b></span>
+        <span class="bridge-op" aria-hidden="true">=</span>
+        <span class="bridge-term is-result"><small>Заработано за всё время</small><b class="${pnlClass(identity.accountResultUsd)}">${formatUsd(identity.accountResultUsd)}</b></span>
+      </div>
+      <div class="bridge-line is-secondary">
+        <span class="bridge-term"><small>Собрано из компонентов</small><b class="${pnlClass(identity.reportedResultUsd)}">${formatUsd(identity.reportedResultUsd)}</b></span>
+        <span class="bridge-op" aria-hidden="true">→</span>
+        <span class="bridge-term"><small>Расхождение</small><b>${formatUsd(identity.differenceUsd)}</b></span>
+        <span class="bridge-op" aria-hidden="true">/</span>
+        <span class="bridge-term"><small>Допуск</small><b>${formatUsd(identity.toleranceUsd)}</b></span>
+      </div>
+    </div>
+  `;
+
+  byId("accountIdentity").innerHTML = `
+    <div class="identity-headline ${tone}">
+      <span class="identity-dot" aria-hidden="true"></span>
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(IDENTITY_HINTS[identity.status]
+        || "разницу стоит объяснить, прежде чем доверять итогу")}</span>
+    </div>
+    ${bridge}
+    <div class="identity-grid">
+      <div><span>Комиссии за всё время</span><strong class="negative">${formatCost(performance.commissionsUsd)}</strong></div>
+      <div><span>Налоги со сделок</span><strong class="negative">${formatCost(performance.transactionTaxesUsd)}</strong></div>
+      <div><span>Доля кэша</span><strong>${formatPercent(payload.allocation?.cashShare)}</strong></div>
+      <div><span>Номинал деривативов</span><strong>${formatUsd(payload.allocation?.derivativeNotionalUsd)}</strong></div>
+      <div><span>Вложенный капитал</span><strong>${formatUsd(payload.allocation?.investedCapitalUsd)}</strong></div>
+      <div><span>Первое внесение</span><strong>${formatDate(performance.firstFundingAt)}</strong></div>
+    </div>
+    ${notCounted.length ? `
+      <div class="not-counted">
+        <strong>Не входит в итог по инструментам</strong>
+        ${notCounted.map(([name, value]) => `<span>${escapeHtml(name)}<b class="${pnlClass(value)}">${formatUsd(value)}</b></span>`).join("")}
+      </div>` : ""}
+  `;
+}
+
+/* ----------------------------------------------------------------- status --- */
+
+// Two clocks, because they fail independently. The pipeline can be dead while the
+// last statement it fetched is recent, and the pipeline can be running fine while
+// IBKR keeps returning an old statement.
+const RUN_AGE_WARNING_HOURS = 26;
+const RUN_AGE_ERROR_HOURS = 72;
+// Generous, because the statement period always ends the day before it is generated
+// and no run happens on Sunday or Monday. Anything tighter is amber every weekend,
+// which teaches the owner to ignore the light.
+const DATA_AGE_WARNING_HOURS = 96;
+const DATA_AGE_ERROR_HOURS = 168;
+
+function hoursSince(value) {
+  const parsed = timeValue(value);
+  if (parsed === null) return null;
+  return (Date.now() - parsed) / 3_600_000;
+}
+
+/**
+ * One line, one light. The previous bar printed four timestamps and a coverage
+ * sentence, which is a lot of reading to answer the only question that matters at a
+ * glance: is what I am looking at current?
+ */
+function renderStatus(payload) {
+  const status = payload.status || {};
+  const level = String(status.level || "WARNING").toUpperCase();
+  // The date of the data itself, not of the run that processed it.
+  const dataAsOf = payload.cash?.asOf || status.activityReconciledAt;
+  const dataAge = hoursSince(dataAsOf);
+  const runAge = hoursSince(payload.generatedAt);
+
+  let tone = "ok";
+  let headline = "Данные IBKR актуальны";
+  if (level === "ERROR") {
+    tone = "error";
+    headline = "Расхождения в учёте — данные под вопросом";
+  } else if (runAge !== null && runAge > RUN_AGE_ERROR_HOURS) {
+    tone = "error";
+    headline = "Дашборд не обновлялся — синхронизация не работает";
+  } else if (dataAge !== null && dataAge > DATA_AGE_ERROR_HOURS) {
+    tone = "error";
+    headline = "Данные IBKR устарели";
+  } else if (runAge !== null && runAge > RUN_AGE_WARNING_HOURS) {
+    tone = "warning";
+    headline = "Дашборд давно не обновлялся";
+  } else if (dataAge !== null && dataAge > DATA_AGE_WARNING_HOURS) {
+    tone = "warning";
+    headline = "Отчёт IBKR давно не обновлялся";
+  } else if (level === "WARNING") {
+    tone = "warning";
+    headline = "Данные актуальны, есть замечания";
+  }
+
+  const problems = Number(status.issueCount || 0);
+  const details = [
+    dataAsOf ? `данные на ${formatDate(dataAsOf)}` : null,
+    `обновлено ${formatDate(payload.generatedAt, true)}`,
+    // Only when there is something to act on. The count of stale prices is not here:
+    // outside trading hours every price is stale by definition, and each row already
+    // says so next to the price it applies to.
+    problems ? `проблемы: ${problems}` : null,
+    payload.publication?.reason === "STATUS_ERROR" ? "публикация остановлена" : null,
+  ].filter(Boolean);
+
+  const container = byId("dataStatus");
+  container.className = `data-status status-${tone}`;
+  container.innerHTML = `
+    <div class="status-main">
+      <span class="status-indicator" aria-hidden="true"></span>
+      <strong>${escapeHtml(headline)}</strong>
+    </div>
+    <div class="status-times"><span>${escapeHtml(details.join(" · "))}</span></div>
+  `;
+}
+
+/* ---------------------------------------------------------------- filters --- */
+
+function populateSelect(select, values, defaultLabel) {
+  const current = select.value;
+  select.innerHTML = `<option value="">${escapeHtml(defaultLabel)}</option>` + values
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right))
+    .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+    .join("");
+  select.value = current;
+}
+
+function renderFilterOptions(rows) {
+  populateSelect(byId("assetFilter"), [...new Set(rows.map((row) => row.assetClass))], "Все классы");
+  populateSelect(byId("currencyFilter"), [...new Set(rows.map((row) => row.currency))], "Все валюты");
+}
+
+function isOpen(row) {
+  return Math.abs(numberValue(row.quantity) || 0) > 1e-8;
+}
+
+const SORT_ACCESSORS = {
+  instrument: (row) => `${row.symbol || ""} ${row.instrument || ""}`,
+  currency: (row) => row.currency || "",
+  status: (row) => statusLabel(row),
+  cycle: (row) => row.cycleOpenedAt || "",
+  quantity: (row) => numberValue(row.quantity),
+  averageEntry: (row) => numberValue(row.averageEntry),
+  averageExit: (row) => numberValue(row.averageExit),
+  currentPrice: (row) => numberValue(row.currentPrice?.price),
+  marketValueUsd: (row) => numberValue(row.marketValueUsd),
+  unrealizedPnlUsd: (row) => numberValue(row.unrealizedPnlUsd),
+  realizedPnlUsd: (row) => numberValue(row.realizedPnlUsd),
+  dividendsNetUsd: (row) => numberValue(row.dividendsNetUsd),
+  totalResultUsd: (row) => numberValue(row.totalResultUsd),
+};
+
+function defaultRowCompare(left, right) {
+  const openDifference = Number(isOpen(right)) - Number(isOpen(left));
+  if (openDifference) return openDifference;
+  if (isOpen(left)) {
+    return Math.abs(numberValue(right.marketValueUsd) || 0) - Math.abs(numberValue(left.marketValueUsd) || 0);
+  }
+  return String(right.cycleClosedAt || "").localeCompare(String(left.cycleClosedAt || ""));
+}
+
+function sortRows(rows) {
+  const accessor = SORT_ACCESSORS[state.sortKey];
+  if (!accessor || !state.sortDirection) return rows.sort(defaultRowCompare);
+
+  return rows.sort((left, right) => {
+    const leftValue = accessor(left);
+    const rightValue = accessor(right);
+    const leftMissing = leftValue === null || leftValue === undefined || leftValue === "";
+    const rightMissing = rightValue === null || rightValue === undefined || rightValue === "";
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    if (leftMissing) return defaultRowCompare(left, right);
+
+    const comparison = typeof leftValue === "number" && typeof rightValue === "number"
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue), "ru", { sensitivity: "base", numeric: true });
+    if (comparison) return state.sortDirection === "descending" ? -comparison : comparison;
+    return defaultRowCompare(left, right);
+  });
+}
+
+function renderSortHeaders() {
+  document.querySelectorAll("button[data-sort]").forEach((button) => {
+    const active = button.dataset.sort === state.sortKey && Boolean(state.sortDirection);
+    const header = button.closest("th");
+    const indicator = button.querySelector(".sort-indicator");
+    header.setAttribute("aria-sort", active ? state.sortDirection : "none");
+    button.classList.toggle("active", active);
+    indicator.textContent = active ? (state.sortDirection === "descending" ? "↓" : "↑") : "↕";
+  });
+}
+
+function activeFilterCount() {
+  return ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]
+    .filter((id) => byId(id).value).length
+    + (byId("searchInput").value.trim() ? 1 : 0)
+    + (state.activeTab === "all" ? 0 : 1);
+}
+
+function filteredRows() {
+  const search = byId("searchInput").value.trim().toLowerCase();
+  const asset = byId("assetFilter").value;
+  const direction = byId("directionFilter").value;
+  const currency = byId("currencyFilter").value;
+  const profit = byId("profitFilter").value;
+  const rows = [...(state.payload?.rows || [])].filter((row) => {
+    if (state.activeTab === "open" && !isOpen(row)) return false;
+    if (state.activeTab === "closed" && isOpen(row)) return false;
+    if (state.activeTab === "review" && row.status !== "REVIEW") return false;
+    if (asset && row.assetClass !== asset) return false;
+    if (direction && row.direction !== direction) return false;
+    if (currency && row.currency !== currency) return false;
+    const result = numberValue(row.totalResultUsd) || 0;
+    if (profit === "profit" && result <= 0) return false;
+    if (profit === "loss" && result >= 0) return false;
+    if (search) {
+      const haystack = [row.instrument, row.symbol, row.conid, ...(row.symbolHistory || [])]
+        .join(" ").toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+  return sortRows(rows);
+}
+
+/* ------------------------------------------------------------------ table --- */
+
+function statusLabel(row) {
+  if (row.status === "REVIEW") return "Проверить";
+  return isOpen(row) ? "Открыта" : "Закрыта";
+}
+
+function statusClass(row) {
+  if (row.status === "REVIEW") return "review";
+  return isOpen(row) ? "open" : "closed";
+}
+
+function alertDraftValue(row, side) {
+  return state.alertDrafts.get(`${row.conid}:${side}`) || "";
+}
+
+const BREAK_EVEN_REASONS = {
+  NO_OPEN_POSITION: "Нет открытого остатка",
+  ZERO_QUANTITY: "Остаток равен нулю",
+  UNREACHABLE: "При текущем остатке безубыточность недостижима",
+  FX_UNAVAILABLE: "Не хватает актуального курса валюты",
+};
+
+function breakEvenMarkup(row) {
+  if (row.breakEvenStatus === "AVAILABLE" && row.breakEvenPrice != null) {
+    const action = row.breakEvenCondition === "BUY_AT_OR_BELOW"
+      ? "Покупка остатка не дороже"
+      : "Продажа остатка не дешевле";
+    // The caveat that used to sit under the price is true but was three lines long
+    // for a number read at a glance, so it moved to the hover text.
+    return `
+      <div class="break-even-card" title="Учтены все проведённые комиссии и чистые дивиденды; будущая комиссия закрытия не включена">
+        <span>Безубыточность всей истории</span>
+        <strong>${formatMoney(row.breakEvenPrice, row.currency, true)}</strong>
+        <small>${action} этой цены</small>
+      </div>
+    `;
+  }
+  const reason = BREAK_EVEN_REASONS[row.breakEvenStatus] || "Расчёт недоступен";
+  return `
+    <div class="break-even-card unavailable">
+      <span>Безубыточность всей истории</span>
+      <strong>—</strong>
+      <small>${escapeHtml(reason)}</small>
+    </div>
+  `;
+}
+
+function alertMarkup(row) {
+  return `
+    <div class="alert-panel">
+      <div class="alert-heading">
+        <div><h3>Ценовые алерты</h3><p>Доступны для любого инструмента из истории</p></div>
+        <span class="alert-draft-status">Черновик · сервер не подключён</span>
+      </div>
+      <div class="alert-grid">
+        <label class="alert-control buy-alert">
+          <span>Покупка <small>Ask ≤</small></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="buy" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "buy"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+        </label>
+        <label class="alert-control sell-alert">
+          <span>Продажа <small>Bid ≥</small></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="sell" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "sell"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+        </label>
+        ${breakEvenMarkup(row)}
+      </div>
+      <p class="alert-footnote">Введённые уровни сохраняются только до закрытия вкладки и не отправляют уведомления. Для жёстких уровней используйте штатные алерты IBKR.</p>
+    </div>
+  `;
+}
+
+function cycleMarkup(row) {
+  const cycles = [...(row.cycles || [])].reverse();
+  return cycles.map((cycle) => {
+    const fallbackResult = (numberValue(cycle.realizedPnlUsd) || 0)
+      + (numberValue(cycle.dividendsNetUsd) || 0);
+    const totalResult = numberValue(cycle.totalResultUsd) ?? fallbackResult;
+    const corporateIn = numberValue(cycle.corporateInQuantity) || 0;
+    const open = !cycle.closedAt;
+    return `
+      <article class="cycle-item ${open ? "is-open" : ""}">
+        <header>
+          <span class="cycle-number">Цикл ${escapeHtml(cycle.number)}</span>
+          <span class="cycle-direction">${escapeHtml(cycle.direction)}</span>
+          <span class="cycle-period">${formatDate(cycle.openedAt)} → ${open ? "сейчас" : formatDate(cycle.closedAt)}</span>
+          <strong class="${pnlClass(totalResult)}">${formatSignedUsd(totalResult)}</strong>
+        </header>
+        <div class="cycle-facts">
+          <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b></span>
+          <span><small>Средний вход</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
+          <span><small>Средний выход</small><b>${formatMoney(cycle.averageExit, row.currency, true)}</b></span>
+          <span><small>Операций</small><b>${(cycle.trades || []).length}</b></span>
+        </div>
+      </article>
+    `;
+  }).join("") || '<div class="muted-value">Циклы отсутствуют</div>';
+}
+
+function detailHtml(row) {
+  const review = (row.reviewReasons || []).length
+    ? `<div class="review-box">${row.reviewReasons.map(escapeHtml).join("<br>")}</div>`
+    : "";
+  const corporateActions = (row.corporateActions || []).length
+    ? `<div class="corporate-history"><strong>Корпоративные действия</strong>${row.corporateActions.map((event) => `<span>${formatDate(event.timestamp)} · ${escapeHtml(event.description || event.category)}</span>`).join("")}</div>`
+    : "";
+  // Only fields that carry a value are shown. A grid of dashes is not information,
+  // and every optional entry below is genuinely absent for most instruments.
+  const optional = (label, markup, present) =>
+    present ? `<div class="detail-item"><span>${label}</span><strong>${markup}</strong></div>` : "";
+  const foreign = String(row.currency || "USD").toUpperCase() !== "USD";
+  const history = (row.symbolHistory || []).filter(Boolean);
+  return `
+    <tr class="detail-row"><td colspan="13">
+      <div class="detail-wrap">
+        <section class="detail-section">
+          <h3>Инструмент</h3>
+          <div class="detail-grid">
+            <div class="detail-item"><span>Conid</span><strong>${escapeHtml(row.conid)}</strong></div>
+            <div class="detail-item"><span>Биржа</span><strong>${escapeHtml(row.exchange || "—")}</strong></div>
+            <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
+            ${optional("История тикеров",
+              escapeHtml(history.join(" → ")), history.length > 1)}
+            ${optional("Себестоимость позиции, AVCO",
+              formatMoney(row.openBasis, row.currency, true), isOpen(row))}
+            ${optional("Она же в USD по курсам покупок",
+              formatUsd(row.openBasisUsd), isOpen(row) && foreign)}
+            ${optional("Дивиденды gross",
+              formatMoney(row.dividendsGross, row.currency, true),
+              numberValue(row.dividendsGross))}
+            ${optional("Дивиденды net, после налогов",
+              formatMoney(row.dividendsNet, row.currency, true),
+              numberValue(row.dividendsNet))}
+            ${optional("Комиссии",
+              `<span class="negative">${formatCost(row.commissionsUsd)}</span>`,
+              numberValue(row.commissionsUsd))}
+            ${optional("Прочие сборы",
+              `<span class="${pnlClass(row.otherFeesUsd)}">${formatUsd(row.otherFeesUsd)}</span>`,
+              numberValue(row.otherFeesUsd))}
+            ${optional("Из них валютный результат",
+              `<span class="${pnlClass(row.fxRealizedPnlUsd)}">${formatUsd(row.fxRealizedPnlUsd)}</span>`,
+              numberValue(row.fxRealizedPnlUsd))}
+          </div>
+          ${review}
+          ${corporateActions}
+        </section>
+        <section class="detail-section"><h3>Позиционные циклы</h3><div class="cycle-list">${cycleMarkup(row)}</div>${alertMarkup(row)}</section>
+      </div>
+    </td></tr>
+  `;
+}
+
+const FRESHNESS_LABELS = {
+  stale: "устарела",
+  fallback: "резервная",
+  unavailable: "нет данных",
+};
+
+/** A hairline under a number, right-aligned like the number, sized as a share. */
+function magnitudeBar(value, max, tone) {
+  const parsed = numberValue(value);
+  if (parsed === null || !max) return "";
+  const share = Math.min(1, Math.abs(parsed) / max);
+  if (share < 0.005) return "";
+  const percent = (share * 100).toFixed(2);
+  return `<svg class="cell-bar tone-${tone}" width="100%" height="3" preserveAspectRatio="none" aria-hidden="true"><rect x="${(100 - Number(percent)).toFixed(2)}%" y="0" width="${percent}%" height="3" rx="1.5" /></svg>`;
+}
+
+function rowHtml(row, scale) {
+  const quote = row.currentPrice || {};
+  // Priced in the currency the quote itself is denominated in, not the instrument's:
+  // if those ever disagree the label must not hide it.
+  const price = quote.price == null
+    ? "—"
+    : formatMoney(quote.price, quote.currency || row.currency, true);
+  const stale = String(quote.freshness || "").toLowerCase() === "stale";
+  // The quote type is only worth a column inch when it is not the ordinary one:
+  // printing "LAST" on every row of 253 crowded out the timestamp beside it.
+  const priceMeta = [
+    quote.type && quote.type !== "LAST" ? quote.type : null,
+    quote.marketTime ? formatDateShort(quote.marketTime, "time").replace(", ", " ") : null,
+    FRESHNESS_LABELS[String(quote.freshness || "").toLowerCase()],
+  ].filter(Boolean).join(" · ");
+  const open = isOpen(row);
+  const cycleDates = `${formatDateShort(row.cycleOpenedAt)} <span class="cycle-arrow" aria-hidden="true">→</span> ${open ? '<span class="cycle-now">сейчас</span>' : formatDateShort(row.cycleClosedAt)}`;
+  const initial = escapeHtml((row.symbol || "?").slice(0, 2).toUpperCase());
+  const expanded = state.expanded.has(row.conid);
+  const total = numberValue(row.totalResultUsd);
+  return `
+    <tr class="data-row ${expanded ? "expanded" : ""}" data-conid="${escapeHtml(row.conid)}"
+      tabindex="0" role="button" aria-expanded="${expanded}">
+      <td><div class="instrument-cell"><span class="instrument-avatar" aria-hidden="true">${initial}</span><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
+      <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
+      <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
+      <td class="cycle-cell">${cycleDates}</td>
+      <td class="numeric">${formatNumber(row.quantity, 8)}</td>
+      <td class="numeric">${formatMoney(row.averageEntry, row.currency, true)}</td>
+      <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.averageExit, row.currency, true)}</td>
+      <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
+      <td class="numeric">${formatUsdCell(row.marketValueUsd)}${magnitudeBar(row.marketValueUsd, scale.marketValue, "neutral")}</td>
+      <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatUsdCell(row.unrealizedPnlUsd)}</td>
+      <td class="numeric ${pnlClass(row.realizedPnlUsd)}">${formatUsdCell(row.realizedPnlUsd)}</td>
+      <td class="numeric ${pnlClass(row.dividendsNetUsd)}">${formatUsdCell(row.dividendsNetUsd)}</td>
+      <td class="numeric is-total ${pnlClass(total)}">${formatUsdCell(total)}${magnitudeBar(total, scale.total, total > 0 ? "up" : "down")}</td>
+    </tr>
+    ${expanded ? detailHtml(row) : ""}
+  `;
+}
+
+const GROUP_LABELS = {
+  open: "Открытые позиции",
+  closed: "Закрытая история",
+};
+
+function groupRow(kind, count) {
+  // The label lives in the first cell, which is the one pinned to the left edge, and
+  // is allowed to overflow into the empty cell beside it. In a single cell spanning
+  // the whole row it scrolled away and left an unexplained empty band.
+  return `<tr class="group-row"><td class="group-cell"><span>${GROUP_LABELS[kind]}</span><b>${count}</b></td><td colspan="12"></td></tr>`;
+}
+
+function renderRows() {
+  const rows = filteredRows();
+  renderSortHeaders();
+  renderKpis(state.payload, rows);
+  const scale = {
+    marketValue: Math.max(...rows.map((row) => Math.abs(numberValue(row.marketValueUsd) || 0)), 0),
+    total: Math.max(...rows.map((row) => Math.abs(numberValue(row.totalResultUsd) || 0)), 0),
+  };
+
+  // Grouping only where the order is the default one: under an explicit sort a
+  // heading claiming "open positions" would sit above rows that are not grouped.
+  const grouped = !state.sortKey && state.activeTab === "all";
+  const openCount = grouped ? rows.filter(isOpen).length : 0;
+  let previousGroup = null;
+  const markup = [];
+  for (const row of rows) {
+    if (grouped) {
+      const group = isOpen(row) ? "open" : "closed";
+      if (group !== previousGroup) {
+        markup.push(groupRow(group, group === "open" ? openCount : rows.length - openCount));
+        previousGroup = group;
+      }
+    }
+    markup.push(rowHtml(row, scale));
+  }
+  portfolioBody.innerHTML = markup.join("");
+  byId("resultCount").textContent = `${rows.length} из ${state.payload?.rows?.length || 0}`;
+  byId("emptyState").hidden = rows.length > 0;
+  byId("resetFilters").hidden = activeFilterCount() === 0;
+}
+
+function toggleRow(conid) {
+  if (!conid) return;
+  if (state.expanded.has(conid)) state.expanded.delete(conid);
+  else state.expanded.add(conid);
+  renderRows();
+}
+
+// One delegated listener for the whole table instead of one per row per render.
+portfolioBody.addEventListener("click", (event) => {
+  if (event.target.closest("input, label, .alert-panel")) return;
+  toggleRow(event.target.closest("tr.data-row")?.dataset.conid);
+});
+
+portfolioBody.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target.closest("tr.data-row");
+  if (!row) return;
+  event.preventDefault();
+  toggleRow(row.dataset.conid);
+});
+
+portfolioBody.addEventListener("input", (event) => {
+  const input = event.target.closest("input[data-alert-side]");
+  if (!input) return;
+  const key = `${input.dataset.conid}:${input.dataset.alertSide}`;
+  if (input.value) state.alertDrafts.set(key, input.value);
+  else state.alertDrafts.delete(key);
+});
+
+/* ----------------------------------------------------------------- issues --- */
+
+const ISSUE_TITLES = {
+  QUANTITY_MISMATCH: "Количество не совпадает с IBKR",
+  AVCO_IBKR_BASIS_DIFFERENCE: "AVCO отличается от базиса IBKR",
+  BASIS_NOT_COMPARABLE: "Базис сравнить не удалось",
+  RECONCILIATION_INCOMPLETE: "Сверка себестоимости не выполнена",
+  POSITION_BASIS_CHECK_DEFERRED: "Сверка себестоимости выполнена частично",
+  RECONCILIATION_STALE: "Вердикт сверки устарел",
+  RECONCILIATION_MISSING: "Сверка ни разу не выполнялась",
+  CURRENCY_MISMATCH: "Валюта позиции у брокера не совпадает",
+  ASSET_CLASS_MISMATCH: "Класс актива у брокера не совпадает",
+  BROKER_BASIS_INCONSISTENT: "Данные брокера противоречивы",
+  POSITIONS_STALE: "Снимок позиций устарел",
+  POSITIONS_SECTION_MISSING: "В отчёте нет раздела позиций",
+  CASH_REPORT_SECTION_MISSING: "В отчёте нет раздела кэша",
+  CASH_SUMMARY_DISAGREES_WITH_CURRENCY_ROWS: "Итог кэша не сходится с валютными строками",
+  DUPLICATE_BROKER_POSITION_ROWS: "Брокер вернул дубликаты позиций",
+  DATA_SOURCE_WARNING: "Проблема источника данных",
+  ACCOUNT_IDENTITY_MISMATCH: "Итог не сходится со счётом",
+  UNMATCHED_CASH_EVENT: "Кэш не привязан к инструменту",
+  CORPORATE_BASIS_UNALLOCATED: "Себестоимость по КД никуда не перешла",
+};
+
+// The pipeline emits English messages; the page is Russian. Where a type has a known
+// explanation it wins, and the raw message stays as the fallback for anything new.
+const ISSUE_EXPLANATIONS = {
+  QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
+  AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
+  BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
+  RECONCILIATION_INCOMPLETE: "IBKR отключил расчёт себестоимости в этом отчёте, поэтому сверка не выполнена ни по одной позиции.",
+  POSITION_BASIS_CHECK_DEFERRED: "По части позиций IBKR не отдал себестоимость, сверка выполнена не полностью.",
+  RECONCILIATION_STALE: "Последняя сверка с IBKR слишком старая, чтобы описывать текущие цифры.",
+  RECONCILIATION_MISSING: "Сверка с IBKR ни разу не выполнялась.",
+  CURRENCY_MISMATCH: "Валюта позиции у брокера отличается от локальной — все конверсии по этой бумаге под вопросом.",
+  ASSET_CLASS_MISMATCH: "IBKR относит инструмент к другому классу активов.",
+  BROKER_BASIS_INCONSISTENT: "Себестоимость за единицу и общий итог у самого IBKR не согласуются между собой.",
+  POSITIONS_STALE: "Снимок позиций IBKR старше трёх суток: совпадение количеств мало что доказывает.",
+  POSITIONS_SECTION_MISSING: "В отчёте не было раздела позиций, использован предыдущий снимок.",
+  CASH_REPORT_SECTION_MISSING: "В отчёте не было раздела кэша, использованы предыдущие остатки.",
+  CASH_SUMMARY_DISAGREES_WITH_CURRENCY_ROWS: "Итог кэша в базовой валюте не равен сумме валютных строк по курсам того же отчёта.",
+  DUPLICATE_BROKER_POSITION_ROWS: "Брокер вернул несколько строк на один conid; сравнивалась только последняя.",
+  ACCOUNT_IDENTITY_MISMATCH: "Стоимость активов плюс кэш минус внесённое не равно сумме компонентов результата.",
+  UNMATCHED_CASH_EVENT: "Дивиденд или налог не удалось привязать ни к одному инструменту.",
+  CORPORATE_BASIS_UNALLOCATED: "Себестоимость, освободившаяся при корпоративном действии, никуда не перешла.",
+};
+
+const SEVERITY_RANK = { ERROR: 0, WARNING: 1, INFO: 2 };
+
+function issueNumbers(issue) {
+  const parts = [];
+  if (issue.local != null || issue.ibkr != null) {
+    const currency = issue.comparisonCurrency || issue.currency || "USD";
+    parts.push(`локально ${formatMoney(issue.local, currency, true)} · IBKR ${formatMoney(issue.ibkr, currency, true)}`);
+  }
+  if (issue.differencePercent != null) {
+    parts.push(`разница ${formatNumber(issue.differencePercent, 2)} %`);
+  }
+  if (issue.basisDifferenceUsd != null) {
+    parts.push(`на ${formatUsd(issue.basisDifferenceUsd)}`);
+  }
+  if (issue.count != null) parts.push(`${issue.count} позиц.`);
+  if (issue.ageHours != null) parts.push(`возраст ${formatNumber(issue.ageHours, 1)} ч`);
+  return parts.join(" · ");
+}
+
+function renderIssues(payload) {
+  const reconciliationIssues = (payload.reconciliation?.issues || [])
+    // INFO items are informational by construction. The AVCO-versus-FIFO difference in
+    // particular is the expected consequence of choosing average cost, and listing it
+    // once per position taught the reader to skim past the panel entirely.
+    .filter((issue) => String(issue.severity || "").toUpperCase() !== "INFO");
+  const globalIssues = (payload.globalReviewEvents || []).map((event) => ({
+    severity: "ERROR",
+    type: event.category,
+    message: event.description,
+  }));
+  const issues = [...reconciliationIssues, ...globalIssues].sort((left, right) => {
+    const bySeverity = (SEVERITY_RANK[String(left.severity).toUpperCase()] ?? 3)
+      - (SEVERITY_RANK[String(right.severity).toUpperCase()] ?? 3);
+    if (bySeverity) return bySeverity;
+    return Math.abs(numberValue(right.basisDifferenceUsd) || 0)
+      - Math.abs(numberValue(left.basisDifferenceUsd) || 0);
+  });
+  byId("issuesPanel").hidden = issues.length === 0;
+  byId("issuesList").innerHTML = issues.map((issue) => {
+    const severity = String(issue.severity || "WARNING").toUpperCase();
+    const tone = SEVERITY_RANK[severity] === undefined ? "warning" : severity.toLowerCase();
+    const title = ISSUE_TITLES[issue.type] || issue.type;
+    const explanation = ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
+    const numbers = issueNumbers(issue);
+    return `
+      <div class="issue-item ${escapeHtml(tone)}">
+        <span class="severity">${escapeHtml(severity)}</span>
+        <span class="issue-type">${escapeHtml(issue.symbol ? `${issue.symbol} · ${title}` : title)}</span>
+        <span class="issue-message">${numbers ? `${escapeHtml(numbers)} — ` : ""}${escapeHtml(explanation)}</span>
+      </div>
+    `;
+  }).join("");
+}
+
+/* ------------------------------------------------------------- lifecycle --- */
+
+function renderDashboard(payload) {
+  state.payload = payload;
+  const version = Number(payload.schemaVersion);
+  byId("schemaWarning").hidden = SUPPORTED_SCHEMA_VERSIONS.includes(version);
+  if (!SUPPORTED_SCHEMA_VERSIONS.includes(version)) {
+    byId("schemaWarning").textContent =
+      `Формат данных версии ${payload.schemaVersion} новее этой страницы — часть значений может не отображаться.`;
+  }
+  renderStatus(payload);
+  renderHero(payload);
+  renderAccountPanel(payload);
+  prepareCharts(payload);
+  // Before the charts, so a panel that starts collapsed is measured as collapsed
+  // rather than drawn at full width and then folded away.
+  applyCollapsed();
+  renderCharts();
+  renderFilterOptions(payload.rows || []);
+  renderRows();
+  renderIssues(payload);
+}
+
+function showDashboard(payload, key) {
+  state.cryptoKey = key;
+  passwordInput.value = "";
+  unlockMessage.textContent = "";
+  unlockView.hidden = true;
+  dashboardView.hidden = false;
+  byId("lockButton").hidden = false;
+  byId("refreshButton").hidden = false;
+  renderDashboard(payload);
+}
+
+const CLEARED_ON_LOCK = [
+  "kpiGrid", "issuesList", "accountIdentity", "dataStatus", "totalsCheck",
+  "heroPanel", "buildupChart", "buildupTable", "timelineChart", "yearChart",
+  "classStrip", "allocationChart", "extremesChart",
+];
+
+/**
+ * Locking has to remove the plaintext from the page, not just hide the container:
+ * with the markup still in the DOM the whole portfolio was one devtools inspection
+ * away, and a reload restored it outright.
+ */
+function lockDashboard(message = "") {
+  state.payload = null;
+  state.cryptoKey = null;
+  state.expanded.clear();
+  state.alertDrafts.clear();
+  state.charts.clear();
+  state.sortKey = null;
+  state.sortDirection = null;
+  portfolioBody.innerHTML = "";
+  for (const id of CLEARED_ON_LOCK) byId(id).innerHTML = "";
+  for (const id of ["accountPanel", "issuesPanel", "totalsCheck", "buildupPanel",
+    "timelinePanel", "allocationPanel", "extremesPanel"]) {
+    byId(id).hidden = true;
+  }
+  tooltip.hidden = true;
+  dashboardView.hidden = true;
+  unlockView.hidden = false;
+  byId("lockButton").hidden = true;
+  byId("refreshButton").hidden = true;
+  unlockMessage.textContent = message;
+  passwordInput.focus();
+}
+
+async function unlockWithPassword(password) {
+  const key = await deriveKey(password, state.envelope);
+  const payload = await decryptEnvelope(state.envelope, key);
+  showDashboard(payload, key);
+  if (rememberDevice.checked) {
+    // After the dashboard is up, and with its own failure path: a storage error is
+    // not a wrong password and must not be reported as one.
+    try {
+      await saveDeviceKey(state.envelope, key);
+    } catch {
+      unlockMessage.textContent = "Ключ не удалось сохранить на этом устройстве.";
+    }
+  }
+}
+
+unlockForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.envelope) {
+    await initialize();
+    if (!state.envelope) return;
+  }
+  unlockButton.disabled = true;
+  unlockMessage.textContent = "Расшифровываем…";
+  try {
+    await unlockWithPassword(passwordInput.value);
+  } catch {
+    unlockMessage.textContent = "Пароль не подошёл или файл данных повреждён.";
+  } finally {
+    unlockButton.disabled = false;
+  }
+});
+
+byId("togglePassword").addEventListener("click", () => {
+  passwordInput.type = passwordInput.type === "password" ? "text" : "password";
+  byId("togglePassword").textContent = passwordInput.type === "password" ? "Показать" : "Скрыть";
+});
+
+byId("lockButton").addEventListener("click", () => lockDashboard());
+byId("forgetDevice").addEventListener("click", async () => {
+  await forgetDeviceKeys();
+  lockDashboard("Сохранённый ключ удалён с этого устройства.");
+});
+
+byId("refreshButton").addEventListener("click", async () => {
+  const button = byId("refreshButton");
+  const label = byId("refreshButtonLabel");
+  const feedback = byId("refreshFeedback");
+  const previousGeneratedAt = state.payload?.generatedAt || "";
+  if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.classList.add("is-refreshing");
+  label.textContent = "Обновляем…";
+  feedback.textContent = "Загружаем свежий снимок…";
+  try {
+    await loadEnvelope({ bypassCache: true });
+    const payload = await decryptEnvelope(state.envelope, state.cryptoKey);
+    renderDashboard(payload);
+    const changed = Boolean(payload.generatedAt && payload.generatedAt !== previousGeneratedAt);
+    label.textContent = changed ? "Обновлено" : "Актуально";
+    feedback.textContent = changed
+      ? `Обновлено: ${formatDate(payload.generatedAt, true)}`
+      : "Новых данных пока нет";
+  } catch (error) {
+    label.textContent = "Ошибка";
+    feedback.textContent = error.message || "Не удалось обновить данные.";
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.classList.remove("is-refreshing");
+    state.refreshTimer = window.setTimeout(() => {
+      label.textContent = "Обновить";
+      feedback.textContent = "";
+      state.refreshTimer = null;
+    }, 3200);
+  }
+});
+
+document.querySelector("thead").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-sort]");
+  if (!button) return;
+  const key = button.dataset.sort;
+  if (state.sortKey !== key) {
+    state.sortKey = key;
+    state.sortDirection = "descending";
+  } else if (state.sortDirection === "descending") {
+    state.sortDirection = "ascending";
+  } else {
+    state.sortKey = null;
+    state.sortDirection = null;
+  }
+  renderRows();
+});
+
+byId("quickTabs").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-tab]");
+  if (!button) return;
+  state.activeTab = button.dataset.tab;
+  byId("quickTabs").querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
+  renderRows();
+});
+
+byId("searchInput").addEventListener("input", () => {
+  if (state.searchTimer) window.clearTimeout(state.searchTimer);
+  state.searchTimer = window.setTimeout(() => {
+    state.searchTimer = null;
+    renderRows();
+  }, SEARCH_DEBOUNCE_MS);
+});
+
+["assetFilter", "directionFilter", "currencyFilter", "profitFilter"].forEach((id) => {
+  byId(id).addEventListener("change", renderRows);
+});
+
+byId("resetFilters").addEventListener("click", () => {
+  for (const id of ["assetFilter", "directionFilter", "currencyFilter", "profitFilter"]) {
+    byId(id).value = "";
+  }
+  byId("searchInput").value = "";
+  state.activeTab = "all";
+  byId("quickTabs").querySelectorAll("button")
+    .forEach((item) => item.classList.toggle("active", item.dataset.tab === "all"));
+  renderRows();
+});
+
+// Locking on tab-hide protects an unattended screen, but it also closes the dashboard
+// every time you switch windows, so it is opt-in and the choice is remembered.
+const LOCK_ON_HIDE_KEY = "portfolio-ledger:lock-on-hide";
+
+function lockOnHideEnabled() {
+  try {
+    return window.localStorage.getItem(LOCK_ON_HIDE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const lockOnHideToggle = byId("lockOnHide");
+lockOnHideToggle.checked = lockOnHideEnabled();
+lockOnHideToggle.addEventListener("change", () => {
+  try {
+    window.localStorage.setItem(LOCK_ON_HIDE_KEY, String(lockOnHideToggle.checked));
+  } catch {
+    /* private mode: the setting simply does not persist */
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && state.payload && lockOnHideEnabled()) {
+    lockDashboard("Панель заблокирована, пока вкладка была скрыта.");
+  }
+});
+
+async function initialize() {
+  unlockButton.disabled = true;
+  byId("retryLoad").hidden = true;
+  unlockMessage.textContent = "Загружаем зашифрованный снимок…";
+  try {
+    const envelope = await loadEnvelope();
+    unlockButton.disabled = false;
+    unlockMessage.textContent = "";
+    try {
+      const savedKey = await loadDeviceKey(envelope);
+      if (savedKey) {
+        const payload = await decryptEnvelope(envelope, savedKey);
+        showDashboard(payload, savedKey);
+      }
+    } catch {
+      await forgetDeviceKeys();
+      unlockMessage.textContent = "Сохранённый ключ устарел. Введите пароль снова.";
+    }
+  } catch (error) {
+    unlockMessage.textContent = error.message;
+    byId("retryLoad").hidden = false;
+  }
+}
+
+byId("retryLoad").addEventListener("click", initialize);
+
+/* Charts are drawn at a measured pixel width rather than into a scaled viewBox, so
+   they have to be redrawn whenever that width actually changes. Three things change
+   it and none of them fired a redraw before: the first paint at a narrow viewport,
+   where the panel is measured before the layout has settled; a window resize or a
+   phone rotation; and collapsing a neighbouring panel in a two-column row. A chart
+   drawn for the previous width is then clipped by its own container, which at 360 px
+   cut roughly 60 px — the axis labels and the newest point — off every chart. */
+const CHART_HOST_IDS = [
+  "heroMeter", "buildupChart", "timelineChart", "yearChart",
+  "classStrip", "allocationChart", "extremesChart",
+];
+const chartHostWidths = new Map();
+let chartRedrawHandle = null;
+
+function observeChartHosts() {
+  if (typeof ResizeObserver !== "function") return;
+  const observer = new ResizeObserver((entries) => {
+    let changed = false;
+    for (const entry of entries) {
+      const width = Math.round(entry.contentRect.width);
+      // Only a real change counts: writing the SVG must not feed itself a new event.
+      if (width > 0 && chartHostWidths.get(entry.target.id) !== width) {
+        chartHostWidths.set(entry.target.id, width);
+        changed = true;
+      }
+    }
+    if (!changed || !state.payload) return;
+    // A timer rather than requestAnimationFrame: rAF does not run while the tab is
+    // hidden, so a redraw scheduled during a background resize would sit pending and
+    // the charts would still be wrong the moment the tab came back. The delay also
+    // coalesces the burst of events a drag-resize produces.
+    if (chartRedrawHandle) clearTimeout(chartRedrawHandle);
+    chartRedrawHandle = setTimeout(() => {
+      chartRedrawHandle = null;
+      renderCharts();
+    }, 60);
+  });
+  for (const id of CHART_HOST_IDS) {
+    const host = byId(id);
+    if (host) observer.observe(host);
+  }
+}
+
+observeChartHosts();
+initialize();
