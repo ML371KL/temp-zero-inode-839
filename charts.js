@@ -31,19 +31,44 @@ const compactFormatter = new Intl.NumberFormat("ru-RU", {
 
 const wholeFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
 
-/** Axis ticks and in-chart labels: the exact cent belongs in the table, not on a tick. */
-export function compactUsd(value) {
+// Marks print a fixed decimal so a column of them reads as one measure: "18 тыс. $"
+// beside "42,7 тыс. $" looks like a different kind of number, not a rounder one. Axis
+// ticks keep the loose form — a tick is meant to be a round number.
+const compactFixedFormatter = new Intl.NumberFormat("ru-RU", {
+  notation: "compact",
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+function money(value, formatter) {
   if (!Number.isFinite(value)) return "—";
   if (value === 0) return "0 $";
   const sign = value < 0 ? "−" : "";
   const magnitude = Math.abs(value);
+  // Below a thousand there is no compact unit to be inconsistent about, and "400,0 $"
+  // reads as false precision.
   if (magnitude < 1000) return `${sign}${wholeFormatter.format(magnitude)} $`;
-  return `${sign}${compactFormatter.format(magnitude)} $`;
+  return `${sign}${formatter.format(magnitude)} $`;
+}
+
+/** Axis ticks: the exact cent belongs in the table, not on a tick. */
+export function compactUsd(value) {
+  return money(value, compactFormatter);
+}
+
+/** Value labels riding a mark, where every entry in the column must match. */
+export function compactUsdFixed(value) {
+  return money(value, compactFixedFormatter);
 }
 
 export function signedCompactUsd(value) {
   if (!Number.isFinite(value) || value === 0) return compactUsd(value);
   return value > 0 ? `+${compactUsd(value)}` : compactUsd(value);
+}
+
+export function signedCompactUsdFixed(value) {
+  if (!Number.isFinite(value) || value === 0) return compactUsdFixed(value);
+  return value > 0 ? `+${compactUsdFixed(value)}` : compactUsdFixed(value);
 }
 
 const percentFormatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
@@ -162,19 +187,19 @@ export function waterfall(items, width) {
     const tone = item.kind === "total" ? "total" : toneOf(item.value);
     const shown = item.kind === "total" ? span.to : item.value;
     const label = truncateToWidth(item.label, LABEL_FONT, labelWidth);
-    const tip = tipAttributes(item.label, compactUsd(shown), item.note);
+    const tip = tipAttributes(item.label, compactUsdFixed(shown), item.note);
 
     if (index > 0 && item.kind !== "total" && spans[index - 1].item.kind !== "total") {
       const previousEnd = scale(spans[index - 1].to);
       markup += `<line class="chart-connector" x1="${previousEnd}" y1="${y - (rowHeight - barHeight)}" x2="${previousEnd}" y2="${y}" />`;
     }
 
-    markup += `<g class="wf-row tone-${tone}" tabindex="0" role="listitem" aria-label="${escapeHtml(`${item.label}: ${compactUsd(shown)}`)}" ${tip}>`;
+    markup += `<g class="wf-row tone-${tone}" tabindex="0" role="listitem" aria-label="${escapeHtml(`${item.label}: ${compactUsdFixed(shown)}`)}" ${tip}>`;
     markup += `<rect class="chart-hit" x="0" y="${top - 6}" width="${width}" height="${rowHeight}" />`;
     markup += `<text class="chart-label" x="${labelWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(label)}</text>`;
     markup += `<path class="chart-bar" d="${barPath(left, y, barWidth, barHeight, 4, growsRight ? "right" : "left")}" />`;
-    markup += `<text class="chart-value" x="${width - 2}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(compactUsd(shown))}</text>`;
-    markup += `<title>${escapeHtml(`${item.label}: ${compactUsd(shown)}`)}</title>`;
+    markup += `<text class="chart-value" x="${width - 2}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(compactUsdFixed(shown))}</text>`;
+    markup += `<title>${escapeHtml(`${item.label}: ${compactUsdFixed(shown)}`)}</title>`;
     markup += `</g>`;
   });
 
@@ -318,7 +343,7 @@ function yearTicks(first, last) {
 export function columnChart(items, width, options = {}) {
   // The columns are the yearly change of the line above them, so they have to read in
   // whatever unit the line is currently showing.
-  const format = options.format || signedCompactUsd;
+  const format = options.format || signedCompactUsdFixed;
   const height = options.height || 156;
   // Room above for the caps of positive columns and below for two stacked rows:
   // the value under a negative column, then the year. Sized so the two never meet.
@@ -379,7 +404,7 @@ export function rankedBars(items, width, options = {}) {
     const y = top + (rowHeight - barHeight) / 2 - 3;
     const barWidth = Math.max(2, (Math.abs(item.value) / max) * plotWidth);
     const label = truncateToWidth(item.label, LABEL_FONT, labelWidth);
-    const value = item.display ?? compactUsd(item.value);
+    const value = item.display ?? compactUsdFixed(item.value);
     markup += `<g class="rank-item ${item.muted ? "is-muted" : ""}" tabindex="0" aria-label="${escapeHtml(`${item.label}: ${value}`)}" ${tipAttributes(item.label, value, item.note)}>`;
     markup += `<rect class="chart-hit" x="0" y="${top - 3}" width="${width}" height="${rowHeight}" />`;
     markup += `<text class="chart-label" x="${labelWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(label)}</text>`;
@@ -421,7 +446,7 @@ export function divergingBars(items, width, options = {}) {
     const up = item.value >= 0;
     const x = up ? zero : zero - barWidth;
     const label = truncateToWidth(item.label, LABEL_FONT, labelWidth);
-    const value = signedCompactUsd(item.value);
+    const value = signedCompactUsdFixed(item.value);
     markup += `<g class="rank-item tone-${toneOf(item.value)}" tabindex="0" aria-label="${escapeHtml(`${item.label}: ${value}`)}" ${tipAttributes(item.label, value, item.note)}>`;
     markup += `<rect class="chart-hit" x="0" y="${top - 3}" width="${width}" height="${rowHeight}" />`;
     markup += `<text class="chart-label" x="${labelWidth}" y="${y + barHeight / 2 + 4}" text-anchor="end">${escapeHtml(label)}</text>`;
@@ -451,7 +476,7 @@ export function stackedStrip(segments, width, options = {}) {
     const path = side === "both"
       ? barPath(cursor, 0, segmentWidth, height, radius, "right")
       : barPath(cursor, 0, segmentWidth, height, radius, side === "left" ? "left" : "right");
-    const value = segment.display ?? compactUsd(segment.value);
+    const value = segment.display ?? compactUsdFixed(segment.value);
     markup += `<g class="strip-item series-${segment.slot}" tabindex="0" aria-label="${escapeHtml(`${segment.label}: ${value}`)}" ${tipAttributes(segment.label, value, segment.note)}>`;
     markup += `<path class="chart-bar" d="${path}" />`;
     markup += `<title>${escapeHtml(`${segment.label}: ${value}`)}</title>`;
