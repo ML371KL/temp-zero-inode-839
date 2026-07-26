@@ -1258,7 +1258,9 @@ function renderAccountPanel(payload) {
     </div>
     ${bridge}
     <div class="identity-grid">
-      <div><span>Комиссии за всё время</span><strong class="negative">${formatCost(performance.commissionsUsd)}</strong></div>
+      <div><span>Комиссии за всё время${numberValue(performance.currencyCommissionsUsd)
+        ? ` <small class="muted">(в т.ч. ${formatCost(performance.currencyCommissionsUsd)} за валютные конверсии)</small>`
+        : ""}</span><strong class="negative">${formatCost(performance.commissionsUsd)}</strong></div>
       <div><span>Налоги со сделок</span><strong class="negative">${formatCost(performance.transactionTaxesUsd)}</strong></div>
       <div><span>Доля кэша</span><strong>${formatPercent(payload.allocation?.cashShare)}</strong></div>
       <div><span>Номинал деривативов</span><strong>${formatUsd(payload.allocation?.derivativeNotionalUsd)}</strong></div>
