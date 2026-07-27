@@ -2165,6 +2165,18 @@ function cycleMarkup(row) {
     // invite a comparison that is simply false. What the sold half actually cost is
     // its proceeds less what it realised, and against that the exit price reads
     // correctly — 9.42 against 11.12 is the loss the cycle is reporting.
+    // A closed cycle has no remainder by definition, so the slot is better spent on
+    // what actually went through it. Which side "entry" is depends on the direction:
+    // a short opens by selling and closes by buying.
+    const entryQuantity = numberValue(cycle.entryQuantityTotal);
+    const exitQuantity = numberValue(cycle.exitQuantityTotal);
+    const short = cycle.direction === "SHORT";
+    const openedLabel = short ? "Продано" : "Куплено";
+    const closedLabel = short ? "Куплено" : "Продано";
+    // They differ only where a corporate action added or removed shares without a
+    // trade — eight cycles of 535, and the gap is exactly that action's quantity.
+    const quantitiesDiffer = !open && entryQuantity !== null && exitQuantity !== null
+      && Math.abs(entryQuantity - exitQuantity) > 1e-9;
     const soldQuantity = numberValue(cycle.exitQuantityTotal) || 0;
     const exitAverage = numberValue(cycle.averageExit);
     const partial = open && soldQuantity > 0 && exitAverage !== null;
@@ -2180,9 +2192,26 @@ function cycleMarkup(row) {
           <strong class="${pnlClass(totalResult)}">${formatSignedUsd(totalResult)}</strong>
         </header>
         <div class="cycle-facts">
+          ${open ? `
           <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b>${
             partial ? `<small class="cycle-sub">Продано</small><b class="cycle-sub">${formatNumber(cycle.exitQuantityTotal, 8)}</b>` : ""
           }</span>
+          ` : `
+          <span><small${quantitiesDiffer ? ' title="Куплено и продано разное количество: разницу принесло или забрало корпоративное действие"' : ""}>${
+            // Three cycles hold shares that arrived from a spin-off with nothing bought
+            // at all. "Куплено 0" is true and useless; naming the corporate action is
+            // what the line is for.
+            !entryQuantity && corporateIn
+              ? "Получено по КД"
+              : quantitiesDiffer
+                ? escapeHtml(openedLabel)
+                : `${escapeHtml(openedLabel)} и ${escapeHtml(closedLabel.toLowerCase())}`
+          }</small><b>${formatNumber(!entryQuantity && corporateIn ? corporateIn : cycle.entryQuantityTotal, 8)}</b>${
+            quantitiesDiffer
+              ? `<small class="cycle-sub">${escapeHtml(closedLabel)}</small><b class="cycle-sub">${formatNumber(cycle.exitQuantityTotal, 8)}</b>`
+              : ""
+          }</span>
+          `}
           <span><small${partial ? ' title="AVCO того, что осталось в позиции, а не всего купленного за цикл"' : ""}>Средний вход</small><b>${
             formatMoney(cycle.averageEntry, row.currency, true)
           }</b>${
