@@ -2060,6 +2060,20 @@ function rowHtml(row, scale) {
   ].filter(Boolean).join(" · ");
   const open = isOpen(row);
   const cycleDates = `${formatDateShort(row.cycleOpenedAt)} <span class="cycle-arrow" aria-hidden="true">→</span> ${open ? '<span class="cycle-now">сейчас</span>' : formatDateShort(row.cycleClosedAt)}`;
+  // The row is one instrument, but half its columns describe only the latest position
+  // cycle — the dates, the direction, the average entry and exit — while the money to
+  // the right is the instrument's whole life. On a single-cycle row those are the same
+  // thing. On ALB they are not: the last cycle bought at 81.82 and sold at 84.44, and
+  // the row still totals a loss because an earlier cycle lost 4851. Naming the cycle
+  // says which of the two scopes the prices belong to, and points at the entry in the
+  // expanded list where the rest of them are.
+  const cycleCount = (row.cycles || []).length;
+  const cycleScope = cycleCount > 1
+    ? `<span class="row-note cycle-scope" title="${escapeHtml(
+        `У инструмента ${cycleCount} циклов. Средний вход, средний выход, направление и даты `
+        + `относятся к последнему; реализованное, дивиденды и итог — ко всем сразу.`,
+      )}">цикл ${cycleCount} из ${cycleCount}</span>`
+    : "";
   const initial = escapeHtml((row.symbol || "?").slice(0, 2).toUpperCase());
   const expanded = state.expanded.has(row.conid);
   const total = numberValue(row.totalResultUsd);
@@ -2069,7 +2083,7 @@ function rowHtml(row, scale) {
       <td><div class="instrument-cell"><span class="instrument-avatar" aria-hidden="true">${initial}</span><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
       <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
-      <td class="cycle-cell">${cycleDates}</td>
+      <td class="cycle-cell">${cycleDates}${cycleScope}</td>
       <td class="numeric">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(row.averageEntry, row.currency, true)}</td>
       <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.averageExit, row.currency, true)}</td>
