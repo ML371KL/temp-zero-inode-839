@@ -2180,19 +2180,19 @@ function cycleMarkup(row) {
           <strong class="${pnlClass(totalResult)}">${formatSignedUsd(totalResult)}</strong>
         </header>
         <div class="cycle-facts">
-          <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b></span>
-          <span><small${partial ? ' title="AVCO того, что осталось в позиции, а не всего купленного за цикл"' : ""}>${
-            partial ? "Средний вход остатка" : "Средний вход"
-          }</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
-          ${partial ? `
-          <span><small>Продано</small><b>${formatNumber(cycle.exitQuantityTotal, 8)}</b></span>
-          <span><small title="Во что обошлись проданные акции: выручка за вычетом того, что они принесли">Себестоимость проданных</small><b>${formatMoney(soldCostPerShare, row.currency, true)}</b></span>
-          <span><small>Средняя цена продажи</small><b>${formatMoney(cycle.averageExit, row.currency, true)}</b></span>
-          ` : `
-          <span><small>Средний выход</small><b${open ? ' title="Цикл открыт и ничего ещё не продано"' : ""}>${
+          <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b>${
+            partial ? `<small class="cycle-sub">Продано</small><b class="cycle-sub">${formatNumber(cycle.exitQuantityTotal, 8)}</b>` : ""
+          }</span>
+          <span><small${partial ? ' title="AVCO того, что осталось в позиции, а не всего купленного за цикл"' : ""}>Средний вход</small><b>${
+            formatMoney(cycle.averageEntry, row.currency, true)
+          }</b>${
+            partial ? `<small class="cycle-sub" title="Во что обошлись проданные акции: выручка за вычетом того, что они принесли">Проданных</small><b class="cycle-sub">${formatMoney(soldCostPerShare, row.currency, true)}</b>` : ""
+          }</span>
+          <span><small>Средний выход</small><b${open && !partial ? ' title="Цикл открыт и ничего ещё не продано"' : ""}>${
             open ? '<span class="muted-value">—</span>' : formatMoney(cycle.averageExit, row.currency, true)
-          }</b></span>
-          `}
+          }</b>${
+            partial ? `<small class="cycle-sub">Проданных</small><b class="cycle-sub">${formatMoney(cycle.averageExit, row.currency, true)}</b>` : ""
+          }</span>
           <span><small>Дивиденды на акцию</small><b${dividend ? ` title="За цикл получено ${escapeHtml(dividend.total)}"` : ""}>${
             dividend ? dividend.text : '<span class="muted-value">—</span>'
           }</b></span>
