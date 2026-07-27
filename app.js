@@ -1844,17 +1844,16 @@ function isOpen(row) {
 }
 
 /**
- * What the entry column should say about an instrument as a whole.
+ * The entry column is the instrument's whole life, open or closed: the
+ * quantity-weighted price across every cycle it ever had, on the same footing as the
+ * money columns beside it, which have always been lifetime.
  *
- * Closed: the quantity-weighted price across every cycle it ever had, so it sits on
- * the same footing as the money columns beside it, which have always been lifetime.
- *
- * Open: the AVCO of the position actually held right now. Blending it with cycles
- * closed years ago would destroy the one number the column is read for — the cost
- * basis to compare against the current price two columns over.
+ * The AVCO of the position held right now is a different number and has its own home:
+ * "Себестоимость позиции, AVCO" in the expanded card, where it sits with the rest of
+ * what is true only today. Putting it here made STLA's row read 7.56 — the average of
+ * the 3750 left after averaging down — while the row's money covered all 8250 bought.
  */
 function rowAverageEntry(row) {
-  if (isOpen(row)) return row.averageEntry;
   // A payload built before the lifetime pair existed still has the last cycle's.
   // Showing that is what the column did for a year; showing a dash is not better.
   return row.lifetimeAverageEntry ?? row.averageEntry;
@@ -2159,6 +2158,19 @@ function cycleMarkup(row) {
     const corporateIn = numberValue(cycle.corporateInQuantity) || 0;
     const open = !cycle.closedAt;
     const dividend = perShareDividend(cycle, row.currency);
+    // An open cycle that has already sold some of itself holds two different stories,
+    // and one row of prices could only tell one of them. STLA's cycle bought 8250,
+    // sold 4500 and kept 3750: the entry price is the AVCO of what is left after
+    // averaging down, the exit price is what the sold half went for, and the two
+    // invite a comparison that is simply false. What the sold half actually cost is
+    // its proceeds less what it realised, and against that the exit price reads
+    // correctly — 9.42 against 11.12 is the loss the cycle is reporting.
+    const soldQuantity = numberValue(cycle.exitQuantityTotal) || 0;
+    const exitAverage = numberValue(cycle.averageExit);
+    const partial = open && soldQuantity > 0 && exitAverage !== null;
+    const soldCostPerShare = partial
+      ? (exitAverage * soldQuantity - (numberValue(cycle.realizedPnl) || 0)) / soldQuantity
+      : null;
     return `
       <article class="cycle-item ${open ? "is-open" : ""}">
         <header>
@@ -2169,10 +2181,18 @@ function cycleMarkup(row) {
         </header>
         <div class="cycle-facts">
           <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b></span>
-          <span><small>Средний вход</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
-          <span><small>Средний выход</small><b${open ? ' title="Пока цикл открыт, средний вход — это AVCO оставшихся акций, а средний выход был бы средней по уже проданным. Это разные акции, и ставить их рядом нельзя"' : ""}>${
+          <span><small${partial ? ' title="AVCO того, что осталось в позиции, а не всего купленного за цикл"' : ""}>${
+            partial ? "Средний вход остатка" : "Средний вход"
+          }</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
+          ${partial ? `
+          <span><small>Продано</small><b>${formatNumber(cycle.exitQuantityTotal, 8)}</b></span>
+          <span><small title="Во что обошлись проданные акции: выручка за вычетом того, что они принесли">Себестоимость проданных</small><b>${formatMoney(soldCostPerShare, row.currency, true)}</b></span>
+          <span><small>Средняя цена продажи</small><b>${formatMoney(cycle.averageExit, row.currency, true)}</b></span>
+          ` : `
+          <span><small>Средний выход</small><b${open ? ' title="Цикл открыт и ничего ещё не продано"' : ""}>${
             open ? '<span class="muted-value">—</span>' : formatMoney(cycle.averageExit, row.currency, true)
           }</b></span>
+          `}
           <span><small>Дивиденды на акцию</small><b${dividend ? ` title="За цикл получено ${escapeHtml(dividend.total)}"` : ""}>${
             dividend ? dividend.text : '<span class="muted-value">—</span>'
           }</b></span>
