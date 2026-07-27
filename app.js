@@ -427,8 +427,8 @@ function numberFormatter(maximumFractionDigits, minimumFractionDigits = 0) {
   return numberFormatters.get(key);
 }
 
-function moneyFormatter(currency, showCode) {
-  const key = `${currency}:${showCode}`;
+function moneyFormatter(currency, showCode, digits = 2) {
+  const key = `${currency}:${showCode}:${digits}`;
   if (!moneyFormatters.has(key)) {
     let formatter;
     try {
@@ -436,8 +436,8 @@ function moneyFormatter(currency, showCode) {
         style: "currency",
         currency,
         currencyDisplay: showCode ? "code" : "narrowSymbol",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
       });
     } catch {
       formatter = null;
@@ -458,14 +458,41 @@ function formatNumber(value, maximumFractionDigits = 4) {
  * A narrow symbol renders USD, CAD and AUD all as "$", which makes three different
  * amounts look like the same one.
  */
-function formatMoney(value, currency = "USD", showCode = null) {
+function formatMoney(value, currency = "USD", showCode = null, digits = 2) {
   const parsed = numberValue(value);
   if (parsed === null) return "—";
   const code = String(currency || "USD").toUpperCase();
   const withCode = showCode === null ? code !== "USD" : showCode;
-  const formatter = moneyFormatter(code, withCode);
-  if (!formatter) return `${formatNumber(parsed, 2)} ${code}`;
+  const formatter = moneyFormatter(code, withCode, digits);
+  if (!formatter) return `${formatNumber(parsed, digits)} ${code}`;
   return formatter.format(parsed);
+}
+
+/**
+ * PXT's second cycle bought at 18.23, sold at 17.64 and still made money: the shares
+ * paid 3999.04 CAD while they were held, and nothing on the card said so — the two
+ * prices sat there implying a loss. Dividing the cycle's dividends by the quantity
+ * bought puts the payout in the same unit as the prices beside it, so the sign of the
+ * result stops reading as a contradiction.
+ *
+ * The divisor is the entry quantity rather than the exit quantity because an open
+ * cycle has exited nothing — four of them would divide by zero — and because it is
+ * the quantity the payout was actually earned on.
+ *
+ * Two decimals is not enough at this scale: per-share payouts here run from 0.0024 to
+ * 46.58, and 52 of 170 fall below a tenth of a unit.
+ */
+function perShareDividend(cycle, currency) {
+  const total = numberValue(cycle.dividendsNet);
+  const quantity = numberValue(cycle.entryQuantityTotal);
+  if (!total || !quantity) return null;
+  const perShare = total / quantity;
+  const magnitude = Math.abs(perShare);
+  const digits = magnitude >= 1 ? 2 : magnitude >= 0.1 ? 3 : 4;
+  return {
+    text: formatMoney(perShare, currency, true, digits),
+    total: formatMoney(total, currency, true),
+  };
 }
 
 function formatUsd(value) {
@@ -1955,6 +1982,7 @@ function cycleMarkup(row) {
     const totalResult = numberValue(cycle.totalResultUsd) ?? fallbackResult;
     const corporateIn = numberValue(cycle.corporateInQuantity) || 0;
     const open = !cycle.closedAt;
+    const dividend = perShareDividend(cycle, row.currency);
     return `
       <article class="cycle-item ${open ? "is-open" : ""}">
         <header>
@@ -1967,6 +1995,9 @@ function cycleMarkup(row) {
           <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b></span>
           <span><small>Средний вход</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
           <span><small>Средний выход</small><b>${formatMoney(cycle.averageExit, row.currency, true)}</b></span>
+          <span><small>Дивиденды на акцию</small><b${dividend ? ` title="За цикл получено ${escapeHtml(dividend.total)}"` : ""}>${
+            dividend ? dividend.text : '<span class="muted-value">—</span>'
+          }</b></span>
           <span><small>Операций</small><b>${(cycle.trades || []).length}</b></span>
         </div>
       </article>
@@ -2059,7 +2090,10 @@ function rowHtml(row, scale) {
     FRESHNESS_LABELS[String(quote.freshness || "").toLowerCase()],
   ].filter(Boolean).join(" · ");
   const open = isOpen(row);
-  const cycleDates = `${formatDateShort(row.cycleOpenedAt)} <span class="cycle-arrow" aria-hidden="true">→</span> ${open ? '<span class="cycle-now">сейчас</span>' : formatDateShort(row.cycleClosedAt)}`;
+  // Both dates on one line ran past the column and got cut mid-number. The status
+  // column beside it already stands two lines tall, so the second line is free.
+  const cycleFrom = `${formatDateShort(row.cycleOpenedAt)} <span class="cycle-arrow" aria-hidden="true">→</span>`;
+  const cycleTo = open ? '<span class="cycle-now">сейчас</span>' : formatDateShort(row.cycleClosedAt);
   // The row is one instrument, but half its columns describe only the latest position
   // cycle — the dates, the direction, the average entry and exit — while the money to
   // the right is the instrument's whole life. On a single-cycle row those are the same
@@ -2069,10 +2103,10 @@ function rowHtml(row, scale) {
   // expanded list where the rest of them are.
   const cycleCount = (row.cycles || []).length;
   const cycleScope = cycleCount > 1
-    ? `<span class="row-note cycle-scope" title="${escapeHtml(
+    ? ` <span class="cycle-scope" title="${escapeHtml(
         `У инструмента ${cycleCount} циклов. Средний вход, средний выход, направление и даты `
         + `относятся к последнему; реализованное, дивиденды и итог — ко всем сразу.`,
-      )}">цикл ${cycleCount} из ${cycleCount}</span>`
+      )}">· ${cycleCount}/${cycleCount}</span>`
     : "";
   const initial = escapeHtml((row.symbol || "?").slice(0, 2).toUpperCase());
   const expanded = state.expanded.has(row.conid);
@@ -2083,7 +2117,7 @@ function rowHtml(row, scale) {
       <td><div class="instrument-cell"><span class="instrument-avatar" aria-hidden="true">${initial}</span><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
       <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
-      <td class="cycle-cell">${cycleDates}${cycleScope}</td>
+      <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}${cycleScope}</span></td>
       <td class="numeric">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(row.averageEntry, row.currency, true)}</td>
       <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.averageExit, row.currency, true)}</td>
