@@ -785,11 +785,9 @@ tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child 
 .status-pill.closed { color: var(--ink-3); }
 .status-pill.review { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
 
-.cycle-cell { color: var(--ink-2); font-size: 11.5px; }
+.cycle-cell { color: var(--ink-2); font-size: 11.5px; text-align: center; }
 .cycle-line { display: block; white-space: nowrap; }
 .cycle-line + .cycle-line { margin-top: 3px; }
-.cycle-scope { color: var(--ink-3); font-size: 10px; }
-.cycle-arrow { color: var(--ink-3); }
 .cycle-now { color: var(--positive); }
 /* The number above it must never be clipped, but its footnote may be: the note is
    allowed to ellipsise inside the cell rather than run across the next column. */

@@ -1814,14 +1814,31 @@ function isOpen(row) {
   return Math.abs(numberValue(row.quantity) || 0) > 1e-8;
 }
 
+/**
+ * What the entry column should say about an instrument as a whole.
+ *
+ * Closed: the quantity-weighted price across every cycle it ever had, so it sits on
+ * the same footing as the money columns beside it, which have always been lifetime.
+ *
+ * Open: the AVCO of the position actually held right now. Blending it with cycles
+ * closed years ago would destroy the one number the column is read for — the cost
+ * basis to compare against the current price two columns over.
+ */
+function rowAverageEntry(row) {
+  if (isOpen(row)) return row.averageEntry;
+  // A payload built before the lifetime pair existed still has the last cycle's.
+  // Showing that is what the column did for a year; showing a dash is not better.
+  return row.lifetimeAverageEntry ?? row.averageEntry;
+}
+
 const SORT_ACCESSORS = {
   instrument: (row) => `${row.symbol || ""} ${row.instrument || ""}`,
   currency: (row) => row.currency || "",
   status: (row) => statusLabel(row),
-  cycle: (row) => row.cycleOpenedAt || "",
+  cycle: (row) => row.firstTradeAt || row.cycleOpenedAt || "",
   quantity: (row) => numberValue(row.quantity),
-  averageEntry: (row) => numberValue(row.averageEntry),
-  averageExit: (row) => numberValue(row.averageExit),
+  averageEntry: (row) => numberValue(rowAverageEntry(row)),
+  averageExit: (row) => numberValue(row.lifetimeAverageExit ?? row.averageExit),
   currentPrice: (row) => numberValue(row.currentPrice?.price),
   marketValueUsd: (row) => numberValue(row.marketValueUsd),
   unrealizedPnlUsd: (row) => numberValue(row.unrealizedPnlUsd),
@@ -1836,7 +1853,8 @@ function defaultRowCompare(left, right) {
   if (isOpen(left)) {
     return Math.abs(numberValue(right.marketValueUsd) || 0) - Math.abs(numberValue(left.marketValueUsd) || 0);
   }
-  return String(right.cycleClosedAt || "").localeCompare(String(left.cycleClosedAt || ""));
+  return String(right.lastCloseAt || right.cycleClosedAt || "")
+    .localeCompare(String(left.lastCloseAt || left.cycleClosedAt || ""));
 }
 
 function sortRows(rows) {
@@ -2090,24 +2108,14 @@ function rowHtml(row, scale) {
     FRESHNESS_LABELS[String(quote.freshness || "").toLowerCase()],
   ].filter(Boolean).join(" · ");
   const open = isOpen(row);
-  // Both dates on one line ran past the column and got cut mid-number. The status
-  // column beside it already stands two lines tall, so the second line is free.
-  const cycleFrom = `${formatDateShort(row.cycleOpenedAt)} <span class="cycle-arrow" aria-hidden="true">→</span>`;
-  const cycleTo = open ? '<span class="cycle-now">сейчас</span>' : formatDateShort(row.cycleClosedAt);
-  // The row is one instrument, but half its columns describe only the latest position
-  // cycle — the dates, the direction, the average entry and exit — while the money to
-  // the right is the instrument's whole life. On a single-cycle row those are the same
-  // thing. On ALB they are not: the last cycle bought at 81.82 and sold at 84.44, and
-  // the row still totals a loss because an earlier cycle lost 4851. Naming the cycle
-  // says which of the two scopes the prices belong to, and points at the entry in the
-  // expanded list where the rest of them are.
-  const cycleCount = (row.cycles || []).length;
-  const cycleScope = cycleCount > 1
-    ? ` <span class="cycle-scope" title="${escapeHtml(
-        `У инструмента ${cycleCount} циклов. Средний вход, средний выход, направление и даты `
-        + `относятся к последнему; реализованное, дивиденды и итог — ко всем сразу.`,
-      )}">· ${cycleCount}/${cycleCount}</span>`
-    : "";
+  // The instrument's whole life, not the latest cycle's: first trade to last close,
+  // which is the scope the money columns to the right already report on. Both dates on
+  // one line ran past the column and got cut mid-number; the status column beside it
+  // already stands two lines tall, so the second line is free.
+  const cycleFrom = formatDateShort(row.firstTradeAt ?? row.cycleOpenedAt);
+  const cycleTo = open
+    ? '<span class="cycle-now">сейчас</span>'
+    : formatDateShort(row.lastCloseAt ?? row.cycleClosedAt);
   const expanded = state.expanded.has(row.conid);
   const total = numberValue(row.totalResultUsd);
   return `
@@ -2116,10 +2124,10 @@ function rowHtml(row, scale) {
       <td><div class="instrument-cell"><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
       <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
-      <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}${cycleScope}</span></td>
+      <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}</span></td>
       <td class="numeric">${formatNumber(row.quantity, 8)}</td>
-      <td class="numeric">${formatMoney(row.averageEntry, row.currency, true)}</td>
-      <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.averageExit, row.currency, true)}</td>
+      <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
+      <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
       <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
       <td class="numeric">${formatUsdCell(row.marketValueUsd)}${magnitudeBar(row.marketValueUsd, scale.marketValue, "neutral")}</td>
       <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatUsdCell(row.unrealizedPnlUsd)}</td>
