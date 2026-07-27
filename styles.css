@@ -399,8 +399,14 @@ button { color: inherit; }
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
 }
+/* The heading's text column must be allowed to shrink. Its default `min-width: auto`
+   lets a long caption push the tools off the card instead of wrapping. */
+.panel-heading > div:first-child { min-width: 0; }
 .panel-heading h2 { margin: 0; font-size: 15px; letter-spacing: -0.01em; }
 .panel-heading p { margin: 5px 0 0; max-width: 68ch; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+/* This one lists what the line is made of, so it needs the whole width of the card
+   rather than the reading measure the shorter captions are set to. */
+#timelineNote { max-width: none; }
 .panel-body { padding: 18px 20px; }
 .panel-tools { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
 

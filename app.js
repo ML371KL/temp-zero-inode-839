@@ -1398,7 +1398,7 @@ function prepareCharts(payload) {
     // which position earned it; the payment can land weeks later and in another year.
     // Sales are dated individually, not at the close of the cycle they belong to, and
     // the account-level items are on the line too — everything except the unrealised.
-    ? "Всё зафиксированное по своим датам: продажи, дивиденды по отсечке, проценты брокера, сборы и валютные конверсии. Нереализованный P&L сюда не входит — у него нет даты."
+    ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
   updateTimelineNote();
 
