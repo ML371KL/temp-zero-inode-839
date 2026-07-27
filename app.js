@@ -160,6 +160,12 @@ function carveOutFlows(payload, excluded, asOf) {
       for (const trade of cycle.trades || []) {
         const amount = numberValue(trade.cashUsd);
         const time = timeValue(trade.timestamp);
+        // A corporate action moves shares, not cash, and carries no `cashUsd` — there
+        // is nothing to carve out and nothing is missing. An execution without one is
+        // a different thing: a payload built before the field existed. Its flows would
+        // silently go missing and the rate would come out wrong but confident, so say
+        // it is unknown instead.
+        if (amount === null && !trade.actionId) known = false;
         if (amount && time !== null) flows.push({ time, amount: -amount });
       }
       for (const event of cycle.cashEvents || []) {
