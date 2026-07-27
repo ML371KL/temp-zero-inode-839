@@ -1,3 +1,8 @@
 .DS_Store
 Thumbs.db
 *.decrypted.json
+
+# The published payload lives on its own branch, force-pushed to a single commit each
+# time. It is written here by the pipeline and by local test builds, and committing it
+# to `main` would put an incompressible 436 KB blob into the history of the code.
+data/portfolio.enc

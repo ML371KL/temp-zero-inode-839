@@ -2,7 +2,14 @@ name: Deploy encrypted dashboard to Pages
 
 on:
   push:
-    branches: [main]
+    # `main` carries the site and keeps its history, because a bad commit to the code
+    # has to be revertable. `payload` carries one file and is force-pushed to a single
+    # commit every time the pipeline publishes, because the encrypted payload is
+    # incompressible and its history is worth nothing: every version of it is
+    # reproducible from the private repository, and the page never reads more than the
+    # current one. Keeping the two apart is what lets the site publish as often as it
+    # likes without the repository growing.
+    branches: [main, payload]
   workflow_dispatch:
 
 permissions:
@@ -25,6 +32,17 @@ jobs:
       # so a moved tag on any of these actions would be a deployment-capable change to
       # the site that no review would ever see.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Always the site from `main`, whichever branch triggered the run.
+          ref: main
+      - name: Take the payload from its own branch
+        # Deploying the site without it would publish a page that cannot unlock, so a
+        # missing payload fails here rather than silently going live.
+        run: |
+          git fetch --depth 1 origin payload
+          mkdir -p data
+          git show origin/payload:data/portfolio.enc > data/portfolio.enc
+          echo "payload: $(wc -c < data/portfolio.enc) bytes from $(git rev-parse --short origin/payload)"
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
