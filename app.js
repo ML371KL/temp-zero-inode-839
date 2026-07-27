@@ -482,6 +482,20 @@ function formatMoney(value, currency = "USD", showCode = null, digits = 2) {
  * Two decimals is not enough at this scale: per-share payouts here run from 0.0024 to
  * 46.58, and 52 of 170 fall below a tenth of a unit.
  */
+/**
+ * A share count as a round number, with the exact one on hover when it is not.
+ *
+ * Fractional holdings come from dividend reinvestment and spin-offs and run to four
+ * decimals; printing them in full turned a column of counts into a column of noise.
+ */
+function quantityCell(value) {
+  const parsed = numberValue(value);
+  if (parsed === null) return { text: "—", title: "" };
+  const exact = formatNumber(value, 8);
+  const rounded = formatNumber(Math.round(parsed), 0);
+  return { text: rounded, title: rounded === exact ? "" : exact };
+}
+
 function perShareDividend(cycle, currency) {
   const total = numberValue(cycle.dividendsNet);
   const quantity = numberValue(cycle.entryQuantityTotal);
@@ -2168,15 +2182,29 @@ function cycleMarkup(row) {
     // A closed cycle has no remainder by definition, so the slot is better spent on
     // what actually went through it. Which side "entry" is depends on the direction:
     // a short opens by selling and closes by buying.
-    const entryQuantity = numberValue(cycle.entryQuantityTotal);
-    const exitQuantity = numberValue(cycle.exitQuantityTotal);
+    const entryQuantity = numberValue(cycle.entryQuantityTotal) || 0;
+    const exitQuantity = numberValue(cycle.exitQuantityTotal) || 0;
+    const corporateOut = numberValue(cycle.corporateOutQuantity) || 0;
     const short = cycle.direction === "SHORT";
     const openedLabel = short ? "Продано" : "Куплено";
     const closedLabel = short ? "Куплено" : "Продано";
-    // They differ only where a corporate action added or removed shares without a
-    // trade — eight cycles of 535, and the gap is exactly that action's quantity.
-    const quantitiesDiffer = !open && entryQuantity !== null && exitQuantity !== null
-      && Math.abs(entryQuantity - exitQuantity) > 1e-9;
+    // The entry average divides by everything that entered the position, bought or
+    // handed over by a corporate action — GGB's basis of 23697 is spread over 5300
+    // bought plus 780 from a stock dividend, so printing 5300 beside a price of 3.90
+    // invites a multiplication that misses by four thousand. Verified against all nine
+    // cycles that have a corporate action: the entry average is always over this sum,
+    // and bought + received - surrendered always equals sold.
+    const entrySide = entryQuantity + corporateIn;
+    const sidesDiffer = !open && Math.abs(entrySide - exitQuantity) > 1e-9;
+    const entrySideCell = quantityCell(entrySide);
+    const exitCell = quantityCell(exitQuantity);
+    const remainderCell = quantityCell(cycle.quantity);
+    const corporateNote = (corporateIn || corporateOut)
+      ? `${formatNumber(entryQuantity, 8)} куплено`
+        + (corporateIn ? `, ${formatNumber(corporateIn, 8)} получено по корпоративному действию` : "")
+        + (corporateOut ? `, ${formatNumber(corporateOut, 8)} ушло по корпоративному действию` : "")
+        + `, ${formatNumber(exitQuantity, 8)} продано`
+      : "";
     const soldQuantity = numberValue(cycle.exitQuantityTotal) || 0;
     const exitAverage = numberValue(cycle.averageExit);
     const partial = open && soldQuantity > 0 && exitAverage !== null;
@@ -2193,22 +2221,21 @@ function cycleMarkup(row) {
         </header>
         <div class="cycle-facts">
           ${open ? `
-          <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b>${
-            partial ? `<small class="cycle-sub">Продано</small><b class="cycle-sub">${formatNumber(cycle.exitQuantityTotal, 8)}</b>` : ""
+          <span><small${corporateNote ? ` title="${escapeHtml(corporateNote)}"` : ""}>Остаток</small><b${remainderCell.title ? ` title="${escapeHtml(remainderCell.title)}"` : ""}>${remainderCell.text}${corporateIn ? ` · ${quantityCell(corporateIn).text} по КД` : ""}</b>${
+            partial ? `<small class="cycle-sub">Продано</small><b class="cycle-sub"${exitCell.title ? ` title="${escapeHtml(exitCell.title)}"` : ""}>${exitCell.text}</b>` : ""
           }</span>
           ` : `
-          <span><small${quantitiesDiffer ? ' title="Куплено и продано разное количество: разницу принесло или забрало корпоративное действие"' : ""}>${
+          <span><small${corporateNote ? ` title="${escapeHtml(corporateNote)}"` : ""}>${
             // Three cycles hold shares that arrived from a spin-off with nothing bought
-            // at all. "Куплено 0" is true and useless; naming the corporate action is
-            // what the line is for.
+            // at all. "Куплено 0" is true and useless; naming the corporate action is.
             !entryQuantity && corporateIn
-              ? "Получено по КД"
-              : quantitiesDiffer
+              ? (sidesDiffer ? "Получено по КД" : "Получено по КД и продано")
+              : sidesDiffer
                 ? escapeHtml(openedLabel)
                 : `${escapeHtml(openedLabel)} и ${escapeHtml(closedLabel.toLowerCase())}`
-          }</small><b>${formatNumber(!entryQuantity && corporateIn ? corporateIn : cycle.entryQuantityTotal, 8)}</b>${
-            quantitiesDiffer
-              ? `<small class="cycle-sub">${escapeHtml(closedLabel)}</small><b class="cycle-sub">${formatNumber(cycle.exitQuantityTotal, 8)}</b>`
+          }</small><b${entrySideCell.title ? ` title="${escapeHtml(entrySideCell.title)}"` : ""}>${entrySideCell.text}</b>${
+            sidesDiffer
+              ? `<small class="cycle-sub">${escapeHtml(closedLabel)}</small><b class="cycle-sub"${exitCell.title ? ` title="${escapeHtml(exitCell.title)}"` : ""}>${exitCell.text}</b>`
               : ""
           }</span>
           `}
