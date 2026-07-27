@@ -1810,6 +1810,15 @@ function redrawScopedBlocks() {
   renderRows();
 }
 
+/**
+ * Identity of a table row. An instrument traded in both directions is two rows with
+ * the same conid, so anything that remembers a row — which one is expanded, which
+ * alert box holds a half-typed price — has to key on this instead.
+ */
+function rowKey(row) {
+  return row.rowId || `${row.conid}:${row.direction}`;
+}
+
 function isOpen(row) {
   return Math.abs(numberValue(row.quantity) || 0) > 1e-8;
 }
@@ -1934,7 +1943,7 @@ function statusClass(row) {
 }
 
 function alertDraftValue(row, side) {
-  return state.alertDrafts.get(`${row.conid}:${side}`) || "";
+  return state.alertDrafts.get(`${rowKey(row)}:${side}`) || "";
 }
 
 const BREAK_EVEN_REASONS = {
@@ -1979,11 +1988,11 @@ function alertMarkup(row) {
       <div class="alert-grid">
         <label class="alert-control buy-alert">
           <span>Покупка <small>Ask ≤</small></span>
-          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="buy" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "buy"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="buy" data-row-key="${escapeHtml(rowKey(row))}" value="${escapeHtml(alertDraftValue(row, "buy"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
         </label>
         <label class="alert-control sell-alert">
           <span>Продажа <small>Bid ≥</small></span>
-          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="sell" data-conid="${escapeHtml(row.conid)}" value="${escapeHtml(alertDraftValue(row, "sell"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
+          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="sell" data-row-key="${escapeHtml(rowKey(row))}" value="${escapeHtml(alertDraftValue(row, "sell"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
         </label>
         ${breakEvenMarkup(row)}
       </div>
@@ -2116,16 +2125,16 @@ function rowHtml(row, scale) {
   const cycleTo = open
     ? '<span class="cycle-now">сейчас</span>'
     : formatDateShort(row.lastCloseAt ?? row.cycleClosedAt);
-  const expanded = state.expanded.has(row.conid);
+  const expanded = state.expanded.has(rowKey(row));
   const total = numberValue(row.totalResultUsd);
   return `
-    <tr class="data-row ${expanded ? "expanded" : ""}" data-conid="${escapeHtml(row.conid)}"
+    <tr class="data-row ${expanded ? "expanded" : ""}" data-row-key="${escapeHtml(rowKey(row))}"
       tabindex="0" role="button" aria-expanded="${expanded}">
       <td><div class="instrument-cell"><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
-      <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
+      <td class="status-cell"><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
       <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}</span></td>
-      <td class="numeric">${formatNumber(row.quantity, 8)}</td>
+      <td class="numeric quantity-cell">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
       <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
       <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
@@ -2242,17 +2251,17 @@ function syncStickyOffsets() {
   wrap.style.setProperty("--wrap-width", `${wrap.clientWidth}px`);
 }
 
-function toggleRow(conid) {
-  if (!conid) return;
-  if (state.expanded.has(conid)) state.expanded.delete(conid);
-  else state.expanded.add(conid);
+function toggleRow(key) {
+  if (!key) return;
+  if (state.expanded.has(key)) state.expanded.delete(key);
+  else state.expanded.add(key);
   renderRows();
 }
 
 // One delegated listener for the whole table instead of one per row per render.
 portfolioBody.addEventListener("click", (event) => {
   if (event.target.closest("input, label, .alert-panel")) return;
-  toggleRow(event.target.closest("tr.data-row")?.dataset.conid);
+  toggleRow(event.target.closest("tr.data-row")?.dataset.rowKey);
 });
 
 portfolioBody.addEventListener("keydown", (event) => {
@@ -2260,13 +2269,13 @@ portfolioBody.addEventListener("keydown", (event) => {
   const row = event.target.closest("tr.data-row");
   if (!row) return;
   event.preventDefault();
-  toggleRow(row.dataset.conid);
+  toggleRow(row.dataset.rowKey);
 });
 
 portfolioBody.addEventListener("input", (event) => {
   const input = event.target.closest("input[data-alert-side]");
   if (!input) return;
-  const key = `${input.dataset.conid}:${input.dataset.alertSide}`;
+  const key = `${input.dataset.rowKey}:${input.dataset.alertSide}`;
   if (input.value) state.alertDrafts.set(key, input.value);
   else state.alertDrafts.delete(key);
 });

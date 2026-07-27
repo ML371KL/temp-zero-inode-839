@@ -755,6 +755,9 @@ tbody tr.data-row:hover td:first-child, tbody tr.data-row.expanded td:first-chil
 tbody tr.data-row td:last-child { z-index: 1; background: var(--surface); }
 tbody tr.data-row:hover td:last-child, tbody tr.data-row.expanded td:last-child { background: var(--surface-raised); }
 .table-wrap .numeric { text-align: right; }
+/* Centred rather than flush to an edge: both columns hold a short token, not a
+   figure that has to line up decimally with the rows above and below. */
+.table-wrap .status-cell, .table-wrap .quantity-cell { text-align: center; }
 
 /* One unbroken band, and it does not stick. Pinned under the header it left a
    hairline gap below it, both headings piled up on each other once two were pinned at
