@@ -51,6 +51,30 @@ function money(value, formatter) {
   return `${sign}${formatter.format(magnitude)} $`;
 }
 
+/**
+ * Bare numbers for a money axis, all on one scale.
+ *
+ * "400 тыс. $" on every tick is ten characters of gutter for a figure the reader
+ * already has: the endpoint carries the value in full, with its unit. What the ticks
+ * are for is the shape, and a bare "400" says that in three.
+ *
+ * The scale is chosen once for the whole axis rather than per tick, or a range
+ * crossing a million would print "500" beside "1" and mean thousands in one place
+ * and millions in the other.
+ */
+export function bareAxisFormatter(ticks) {
+  const largest = Math.max(0, ...ticks.map((tick) => Math.abs(tick)));
+  const divisor = largest >= 1_000_000 ? 1_000_000 : largest >= 1_000 ? 1_000 : 1;
+  const digits = divisor === 1 ? 0 : 1;
+  const formatter = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: digits });
+  return (value) => {
+    if (!Number.isFinite(value)) return "—";
+    if (value === 0) return "0";
+    const sign = value < 0 ? "−" : "";
+    return `${sign}${formatter.format(Math.abs(value) / divisor)}`;
+  };
+}
+
 /** Axis ticks: the exact cent belongs in the table, not on a tick. */
 export function compactUsd(value) {
   return money(value, compactFormatter);
@@ -235,7 +259,10 @@ function areaLayout(points, width, options = {}) {
   const max = rawMax + span * 0.08;
 
   const ticks = niceTicks(min, max, 4);
-  const gutter = Math.ceil(Math.max(28, ...ticks.map((tick) => textWidth(format(tick), TICK_FONT)))) + 12;
+  // The axis may print something shorter than the endpoint does; measure what it will
+  // actually draw, or the plot is squeezed to fit labels it never uses.
+  const tickFormat = options.axisFormat ? options.axisFormat(ticks) : format;
+  const gutter = Math.ceil(Math.max(28, ...ticks.map((tick) => textWidth(tickFormat(tick), TICK_FONT)))) + 12;
   const plotWidth = Math.max(60, width - padLeft - gutter);
 
   const first = points[0]?.time ?? 0;
@@ -243,7 +270,7 @@ function areaLayout(points, width, options = {}) {
   const timeSpan = last - first || 1;
 
   return {
-    format, height, padTop, padBottom, padLeft, plotHeight, plotWidth, gutter,
+    format, tickFormat, height, padTop, padBottom, padLeft, plotHeight, plotWidth, gutter,
     min, max, ticks, first, last,
     x: (time) => padLeft + ((time - first) / timeSpan) * plotWidth,
     y: (value) => padTop + (1 - (value - min) / (max - min)) * plotHeight,
@@ -254,7 +281,7 @@ function areaLayout(points, width, options = {}) {
 export function areaChart(points, width, options = {}) {
   if (points.length < 2) return "";
   const layout = areaLayout(points, width, options);
-  const { format, height, padTop, padLeft, plotHeight, plotWidth, min, max, ticks, first, last, x, y } = layout;
+  const { format, tickFormat, height, padTop, padLeft, plotHeight, plotWidth, min, max, ticks, first, last, x, y } = layout;
 
   const line = points.map((point, index) => `${index ? "L" : "M"}${x(point.time).toFixed(1)} ${y(point.value).toFixed(1)}`).join(" ");
   const baseline = y(Math.max(min, Math.min(0, max)));
@@ -268,7 +295,7 @@ export function areaChart(points, width, options = {}) {
     const ty = y(tick);
     if (ty < padTop - 2 || ty > padTop + plotHeight + 2) continue;
     markup += `<line class="chart-grid" x1="${padLeft}" y1="${ty.toFixed(1)}" x2="${padLeft + plotWidth}" y2="${ty.toFixed(1)}" />`;
-    markup += `<text class="chart-tick" x="${padLeft + plotWidth + 6}" y="${(ty + 4).toFixed(1)}">${escapeHtml(format(tick))}</text>`;
+    markup += `<text class="chart-tick" x="${padLeft + plotWidth + 6}" y="${(ty + 4).toFixed(1)}">${escapeHtml(tickFormat(tick))}</text>`;
   }
   if (min < 0 && max > 0) {
     markup += `<line class="chart-axis" x1="${padLeft}" y1="${y(0).toFixed(1)}" x2="${padLeft + plotWidth}" y2="${y(0).toFixed(1)}" />`;

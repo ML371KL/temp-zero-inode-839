@@ -405,8 +405,16 @@ button { color: inherit; }
 .panel-heading h2 { margin: 0; font-size: 15px; letter-spacing: -0.01em; }
 .panel-heading p { margin: 5px 0 0; max-width: 68ch; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
 /* This one lists what the line is made of, so it needs the whole width of the card
-   rather than the reading measure the shorter captions are set to. */
-#timelineNote { max-width: none; }
+   rather than the reading measure the shorter captions are set to. Two lines are
+   held whatever it says: the dollar caption runs to two and the percent one to one,
+   and letting the heading breathe between them shunted the chart and its columns up
+   and down every time the unit was switched. */
+#timelineNote { max-width: none; min-height: calc(2 * 1.5 * 12px); }
+/* Narrow enough that the dollar caption needs a third line while the percent one
+   still fits in two. Reserving the taller of the two keeps the chart still. */
+@media (max-width: 420px) {
+  #timelineNote { min-height: calc(3 * 1.5 * 12px); }
+}
 .panel-body { padding: 18px 20px; }
 .panel-tools { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
 

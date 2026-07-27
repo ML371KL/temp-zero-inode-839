@@ -3,6 +3,7 @@
 import {
   areaChart,
   areaGeometry,
+  bareAxisFormatter,
   chartTable,
   columnChart,
   compactUsd,
@@ -18,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260727-8";
+} from "./charts.js?v=20260727-9";
 
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
@@ -1330,15 +1331,19 @@ function renderCharts() {
     const percent = state.timelineMode === "percent" && timeline.percentAvailable;
     const series = percent ? timeline.percentPoints : timeline.points;
     const width = hostWidth(timelineHost);
+    const format = percent ? (value) => sharePercent(value) : undefined;
+    // In dollars the ticks carried the unit too — "400 тыс. $" against "40 %" — and
+    // the axis gutter alone made the plot narrower in one mode than the other. Bare
+    // ticks: the endpoint still prints the value in full, with its unit.
+    const axisFormat = percent ? undefined : bareAxisFormatter;
+    const chartOptions = { height: 224, format, axisFormat };
     timelineHost.innerHTML = areaChart(series, width, {
+      ...chartOptions,
       label: percent
         ? "Реализованный результат к внесённым деньгам"
         : "Реализованный результат нарастающим итогом",
-      height: 224,
-      format: percent ? (value) => sharePercent(value) : undefined,
     });
-    const format = percent ? (value) => sharePercent(value) : undefined;
-    state.charts.set("timelineGeometry", areaGeometry(series, width, { height: 224, format }));
+    state.charts.set("timelineGeometry", areaGeometry(series, width, chartOptions));
     state.charts.set("timelineSeries", { points: series, percent });
     // The columns read in the same unit as the line above them: switching one and
     // leaving the other showing dollars invites reading the two together.
