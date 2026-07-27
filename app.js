@@ -1003,10 +1003,24 @@ function buildupItems(payload) {
   // first one. With no account-level components it repeats the line above it
   // verbatim, and a table that states the same number twice reads like an error.
   if (hasAccountLevel) {
+    // Everything above is booked at the rates of the day it happened. The account is
+    // worth what it is worth today, and foreign cash that was never converted sits
+    // between the two. Leaving it out ended the table 333 dollars away from the
+    // headline with nothing to say why.
+    const residual = numberValue(payload.accountIdentity?.differenceUsd);
+    if (residual) {
+      items.push({
+        label: "Переоценка валютных остатков",
+        value: residual,
+        note: "непереведённые остатки в AUD, CAD, GBP и JPY стоят сегодня иначе, чем в день, когда попали на счёт",
+      });
+    }
     items.push({
-      label: "Итог по счёту",
+      label: residual ? "Заработано за всё время" : "Итог по счёту",
       kind: "total",
-      note: "инструменты плюс то, что не принадлежит ни одной позиции",
+      note: residual
+        ? "то же число, что в шапке"
+        : "инструменты плюс то, что не принадлежит ни одной позиции",
     });
   }
   return items;
@@ -1062,6 +1076,15 @@ function realisedTimeline(payload) {
     }
   }
 
+  // Interest, account fees and the result of each currency conversion are dated, so
+  // they belong on a line that claims to be cumulative. They are not attributable to
+  // an asset class, so they stay whatever the scope is — the same rule the
+  // composition block follows. Unrealised P&L is the one thing that cannot be here:
+  // it would need the market value of every position on every past day.
+  for (const flow of payload.accountCashFlows || []) {
+    add(timeValue(flow.timestamp), numberValue(flow.amountUsd) || 0);
+  }
+
   const months = [...buckets.entries()].sort((left, right) => left[0] - right[0]);
   const points = [];
   let cumulative = 0;
@@ -1110,7 +1133,9 @@ function realisedTimeline(payload) {
     scoped.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
   const expected = sumRows("realizedPnlUsd")
     + sumRows("dividendsNetUsd")
-    + sumRows("otherFeesUsd");
+    + sumRows("otherFeesUsd")
+    + (payload.accountCashFlows || [])
+      .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0);
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
   return {
     points,
@@ -1371,8 +1396,9 @@ function prepareCharts(payload) {
   state.timelineCoverage = covered
     // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
     // which position earned it; the payment can land weeks later and in another year.
-    // Sales are dated individually, not at the close of the cycle they belong to.
-    ? "Каждая продажа — по своей дате, дивиденды — по дате отсечки. Нереализованный P&L сюда не входит."
+    // Sales are dated individually, not at the close of the cycle they belong to, and
+    // the account-level items are on the line too — everything except the unrealised.
+    ? "Всё зафиксированное по своим датам: продажи, дивиденды по отсечке, проценты брокера, сборы и валютные конверсии. Нереализованный P&L сюда не входит — у него нет даты."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
   updateTimelineNote();
 
