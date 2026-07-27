@@ -752,7 +752,7 @@ function filterContext(rows) {
   if (tabLabels[state.activeTab]) parts.push(tabLabels[state.activeTab]);
   const search = byId("searchInput").value.trim();
   if (search) parts.push(`поиск «${search}»`);
-  for (const id of ["directionFilter", "currencyFilter", "profitFilter"]) {
+  for (const id of ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]) {
     const select = byId(id);
     if (select.value) parts.push(select.selectedOptions[0]?.textContent || select.value);
   }
@@ -761,18 +761,27 @@ function filterContext(rows) {
 }
 
 function isFiltered(rows) {
+  // A year can leave the row count untouched while changing every figure in them, so
+  // the count alone cannot decide whether these totals are comparable to the payload's.
+  if (byId("yearFilter").value) return true;
   return rows.length !== (state.payload?.rows?.length || 0);
 }
 
 function renderKpis(payload, rows) {
   const { totals, partial } = aggregateRows(rows);
+  // Under a year the three position cards have nothing to add up: the rows carry no
+  // market value, basis or unrealised, because those describe today and belong to no
+  // year. Zero would read as "worth nothing" rather than "does not apply".
+  const year = byId("yearFilter").value;
+  const position = (value, note) => (year ? [null, "не относится к году"] : [value, note]);
   const cards = [
-    ["Рыночная стоимость", totals.marketValueUsd, "Открытые позиции"],
-    ["Себестоимость, AVCO", totals.openBasisUsd, "По курсам на дату покупки"],
-    ["Нереализованный P&L", totals.unrealizedPnlUsd, "Текущий"],
-    ["Реализованный P&L", totals.realizedPnlUsd, "Закрытые объёмы"],
-    ["Чистые дивиденды", totals.dividendsNetUsd, "После налогов"],
-    ["Итог по инструментам", totals.totalResultUsd, "Без процентов и валютных конверсий"],
+    ["Рыночная стоимость", ...position(totals.marketValueUsd, "Открытые позиции")],
+    ["Себестоимость, AVCO", ...position(totals.openBasisUsd, "По курсам на дату покупки")],
+    ["Нереализованный P&L", ...position(totals.unrealizedPnlUsd, "Текущий")],
+    ["Реализованный P&L", totals.realizedPnlUsd, year ? `Закрыто в ${year}` : "Закрытые объёмы"],
+    ["Чистые дивиденды", totals.dividendsNetUsd, year ? `Получено в ${year}` : "После налогов"],
+    ["Итог по инструментам", totals.totalResultUsd,
+      year ? `За ${year}, без нереализованного` : "Без процентов и валютных конверсий"],
   ];
   byId("kpiContext").textContent = filterContext(rows);
   byId("kpiGrid").innerHTML = cards.map(([label, value, note]) => `
@@ -1755,11 +1764,11 @@ function renderStatus(payload) {
 
 /* ---------------------------------------------------------------- filters --- */
 
-function populateSelect(select, values, defaultLabel) {
+function populateSelect(select, values, defaultLabel, compare = null) {
   const current = select.value;
   select.innerHTML = `<option value="">${escapeHtml(defaultLabel)}</option>` + values
     .filter(Boolean)
-    .sort((left, right) => left.localeCompare(right))
+    .sort(compare || ((left, right) => left.localeCompare(right)))
     .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
     .join("");
   select.value = current;
@@ -1767,6 +1776,17 @@ function populateSelect(select, values, defaultLabel) {
 
 function renderFilterOptions(rows) {
   populateSelect(byId("currencyFilter"), [...new Set(rows.map((row) => row.currency))], "Все валюты");
+  // Every year in which anything at all happened: an execution, a dividend, a fee.
+  const years = new Set();
+  for (const row of rows) {
+    for (const cycle of row.cycles || []) {
+      for (const trade of cycle.trades || []) years.add(String(trade.timestamp || "").slice(0, 4));
+      for (const event of cycle.cashEvents || []) years.add(String(event.timestamp || "").slice(0, 4));
+    }
+  }
+  years.delete("");
+  // Newest first: the year being looked at is almost always a recent one.
+  populateSelect(byId("yearFilter"), [...years], "Любой год", (a, b) => b.localeCompare(a));
   renderScopeFilter();
 }
 
@@ -1898,11 +1918,133 @@ function renderSortHeaders() {
 }
 
 function activeFilterCount() {
-  return ["directionFilter", "currencyFilter", "profitFilter"]
+  return ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]
     .filter((id) => byId(id).value).length
     + (scopeNarrowed() ? 1 : 0)
     + (byId("searchInput").value.trim() ? 1 : 0)
     + (state.activeTab === "all" ? 0 : 1);
+}
+
+const CORPORATE_ACTIONS = new Set(["TO", "TC", "IC", "SO", "SD"]);
+
+/**
+ * The row as one calendar year saw it.
+ *
+ * Realised, dividends and fees are re-summed from the events that carry a timestamp
+ * inside the year, so the figures are the year's own rather than the instrument's
+ * life. Checked against the published payload: summed back over every year they
+ * reproduce each row's lifetime realised, gross, withheld, net and fees exactly.
+ *
+ * The prices are the weighted average of the year's own entries and exits, commission
+ * included. That is deliberately not the same quantity as the unfiltered column, which
+ * is AVCO of what is still held for an open position, and which also absorbs basis
+ * arriving from a corporate action with no price attached. On the 526 closed cycles
+ * with neither of those, the two agree exactly — checked against every one of them.
+ *
+ * Quantity, price, market value, cost basis and unrealised describe the position as it
+ * stands today and belong to no year, so they are dropped rather than carried over from
+ * a lifetime row into a 2023 view.
+ *
+ * Returns null when nothing happened in the year, which is what hides the row.
+ */
+function projectRowToYear(row, year) {
+  const inYear = (stamp) => String(stamp || "").slice(0, 4) === year;
+  let realised = 0;
+  let gross = 0;
+  let withheld = 0;
+  let fees = 0;
+  let commissions = 0;
+  let taxes = 0;
+  // Denominators carry the contract multiplier, because the values above do: an
+  // option at 1.30 on a multiplier of 100 costs 130 and must still average to 1.30.
+  let entryValue = 0;
+  let entryShares = 0;
+  let exitValue = 0;
+  let exitShares = 0;
+  let firstAt = null;
+  let lastAt = null;
+  const cycles = [];
+
+  const seen = (stamp) => {
+    if (!stamp) return;
+    if (firstAt === null || stamp < firstAt) firstAt = stamp;
+    if (lastAt === null || stamp > lastAt) lastAt = stamp;
+  };
+
+  for (const cycle of row.cycles || []) {
+    const trades = (cycle.trades || []).filter((trade) => inYear(trade.timestamp));
+    const cash = (cycle.cashEvents || []).filter((event) => inYear(event.timestamp));
+    if (!trades.length && !cash.length) continue;
+    cycles.push(cycle);
+    const multiplier = numberValue(cycle.multiplier) || 1;
+    for (const trade of trades) {
+      seen(trade.timestamp);
+      realised += numberValue(trade.realizedUsd) || 0;
+      commissions += numberValue(trade.commission) || 0;
+      taxes += numberValue(trade.taxes) || 0;
+      // A corporate action moves shares without a price, so it can weight no average.
+      if (CORPORATE_ACTIONS.has(trade.action)) continue;
+      const quantity = Math.abs(numberValue(trade.quantity) || 0);
+      const notional = quantity * (numberValue(trade.price) || 0) * multiplier;
+      const cost = (numberValue(trade.commission) || 0) + (numberValue(trade.taxes) || 0);
+      // Costs follow the cash, not the leg: a buy pays them on top, a sale nets them
+      // out. Tying the sign to entry-versus-exit instead is right for a long and
+      // backwards for a short, which showed up as ALB's short reporting 205.29 in
+      // against 205.27 out — its own two prices swapped.
+      const value = trade.side === "BUY" ? notional + cost : notional - cost;
+      if (trade.action === "ENTRY") {
+        entryValue += value;
+        entryShares += quantity * multiplier;
+      } else if (trade.action === "EXIT") {
+        exitValue += value;
+        exitShares += quantity * multiplier;
+      }
+    }
+    for (const event of cash) {
+      seen(event.timestamp);
+      const amount = numberValue(event.amountUsd) || 0;
+      if (event.category === "DIVIDEND") gross += amount;
+      else if (event.category === "WITHHOLDING_TAX") withheld += amount;
+      else fees += amount;
+    }
+  }
+
+  if (!cycles.length) return null;
+  const dividendsNet = gross + withheld;
+  return {
+    ...row,
+    projectedYear: year,
+    cycles,
+    firstTradeAt: firstAt,
+    lastCloseAt: lastAt,
+    quantity: null,
+    currentPrice: {},
+    marketValue: null,
+    marketValueUsd: null,
+    openBasis: null,
+    openBasisUsd: null,
+    unrealizedPnl: null,
+    unrealizedPnlUsd: null,
+    unrealizedFxPnlUsd: null,
+    lifetimeAverageEntry: entryShares ? entryValue / entryShares : null,
+    lifetimeAverageExit: exitShares ? exitValue / exitShares : null,
+    averageEntry: null,
+    averageExit: null,
+    realizedPnlUsd: realised,
+    // The published split of realised into price and currency has no per-event
+    // breakdown to re-sum, so it is withheld rather than shown as a lifetime figure.
+    priceRealizedPnlUsd: null,
+    fxRealizedPnlUsd: null,
+    dividendsGrossUsd: gross,
+    withholdingTaxUsd: withheld,
+    dividendsNetUsd: dividendsNet,
+    otherFeesUsd: fees,
+    commissionsUsd: commissions,
+    transactionTaxesUsd: taxes,
+    totalResultUsd: realised + dividendsNet + fees,
+    breakEvenStatus: "NO_OPEN_POSITION",
+    breakEvenPrice: null,
+  };
 }
 
 function filteredRows() {
@@ -1910,23 +2052,30 @@ function filteredRows() {
   const direction = byId("directionFilter").value;
   const currency = byId("currencyFilter").value;
   const profit = byId("profitFilter").value;
-  const rows = [...(state.payload?.rows || [])].filter((row) => {
-    if (state.activeTab === "open" && !isOpen(row)) return false;
-    if (state.activeTab === "closed" && isOpen(row)) return false;
-    if (state.activeTab === "review" && row.status !== "REVIEW") return false;
-    if (!inScope(row)) return false;
-    if (direction && row.direction !== direction) return false;
-    if (currency && row.currency !== currency) return false;
-    const result = numberValue(row.totalResultUsd) || 0;
-    if (profit === "profit" && result <= 0) return false;
-    if (profit === "loss" && result >= 0) return false;
+  const year = byId("yearFilter").value;
+  // The tab and the direction describe the position as it stands, so they are applied
+  // to the row itself. The result filter asks about money, so it has to wait until the
+  // money is the year's.
+  const rows = [];
+  for (const source of state.payload?.rows || []) {
+    if (state.activeTab === "open" && !isOpen(source)) continue;
+    if (state.activeTab === "closed" && isOpen(source)) continue;
+    if (state.activeTab === "review" && source.status !== "REVIEW") continue;
+    if (!inScope(source)) continue;
+    if (direction && source.direction !== direction) continue;
+    if (currency && source.currency !== currency) continue;
     if (search) {
-      const haystack = [row.instrument, row.symbol, row.conid, ...(row.symbolHistory || [])]
+      const haystack = [source.instrument, source.symbol, source.conid, ...(source.symbolHistory || [])]
         .join(" ").toLowerCase();
-      if (!haystack.includes(search)) return false;
+      if (!haystack.includes(search)) continue;
     }
-    return true;
-  });
+    const row = year ? projectRowToYear(source, year) : source;
+    if (!row) continue;
+    const result = numberValue(row.totalResultUsd) || 0;
+    if (profit === "profit" && result <= 0) continue;
+    if (profit === "loss" && result >= 0) continue;
+    rows.push(row);
+  }
   return sortRows(rows);
 }
 
@@ -2079,7 +2228,11 @@ function detailHtml(row) {
           ${review}
           ${corporateActions}
         </section>
-        <section class="detail-section"><h3>Позиционные циклы</h3><div class="cycle-list">${cycleMarkup(row)}</div>${alertMarkup(row)}</section>
+        <section class="detail-section"><h3>Позиционные циклы</h3>${
+          row.projectedYear
+            ? `<p class="detail-note">Показаны циклы, затронутые ${escapeHtml(row.projectedYear)} годом. Цифры внутри цикла — за весь цикл целиком, а не за год.</p>`
+            : ""
+        }<div class="cycle-list">${cycleMarkup(row)}</div>${alertMarkup(row)}</section>
       </div>
     </td></tr>
   `;
@@ -2564,7 +2717,7 @@ byId("searchInput").addEventListener("input", () => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
-["directionFilter", "currencyFilter", "profitFilter"].forEach((id) => {
+["directionFilter", "currencyFilter", "profitFilter", "yearFilter"].forEach((id) => {
   byId(id).addEventListener("change", renderRows);
 });
 
@@ -2590,7 +2743,7 @@ byId("assetScopeAll").addEventListener("click", () => {
 });
 
 byId("resetFilters").addEventListener("click", () => {
-  for (const id of ["directionFilter", "currencyFilter", "profitFilter"]) {
+  for (const id of ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]) {
     byId(id).value = "";
   }
   state.assetScope = new Set();
