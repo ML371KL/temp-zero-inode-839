@@ -2170,7 +2170,9 @@ function cycleMarkup(row) {
         <div class="cycle-facts">
           <span><small>Остаток</small><b>${formatNumber(cycle.quantity, 8)}${corporateIn ? ` · ${formatNumber(corporateIn, 8)} по КД` : ""}</b></span>
           <span><small>Средний вход</small><b>${formatMoney(cycle.averageEntry, row.currency, true)}</b></span>
-          <span><small>Средний выход</small><b>${formatMoney(cycle.averageExit, row.currency, true)}</b></span>
+          <span><small>Средний выход</small><b${open ? ' title="Пока цикл открыт, средний вход — это AVCO оставшихся акций, а средний выход был бы средней по уже проданным. Это разные акции, и ставить их рядом нельзя"' : ""}>${
+            open ? '<span class="muted-value">—</span>' : formatMoney(cycle.averageExit, row.currency, true)
+          }</b></span>
           <span><small>Дивиденды на акцию</small><b${dividend ? ` title="За цикл получено ${escapeHtml(dividend.total)}"` : ""}>${
             dividend ? dividend.text : '<span class="muted-value">—</span>'
           }</b></span>
