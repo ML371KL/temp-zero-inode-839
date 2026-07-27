@@ -2108,13 +2108,12 @@ function rowHtml(row, scale) {
         + `относятся к последнему; реализованное, дивиденды и итог — ко всем сразу.`,
       )}">· ${cycleCount}/${cycleCount}</span>`
     : "";
-  const initial = escapeHtml((row.symbol || "?").slice(0, 2).toUpperCase());
   const expanded = state.expanded.has(row.conid);
   const total = numberValue(row.totalResultUsd);
   return `
     <tr class="data-row ${expanded ? "expanded" : ""}" data-conid="${escapeHtml(row.conid)}"
       tabindex="0" role="button" aria-expanded="${expanded}">
-      <td><div class="instrument-cell"><span class="instrument-avatar" aria-hidden="true">${initial}</span><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
+      <td><div class="instrument-cell"><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
       <td><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
       <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}${cycleScope}</span></td>
