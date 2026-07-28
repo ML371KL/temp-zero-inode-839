@@ -33,7 +33,9 @@ Before the first private-pipeline run, the page displays a setup message because
 
 ## GitHub Pages
 
-The included workflow deploys the repository on every push to `main`. In repository
+The included workflow deploys the repository on every push to `main`, and also on
+every push to the `payload` branch — the branch the private pipeline force-pushes
+`data/portfolio.enc` to when it publishes a new encrypted snapshot. In repository
 settings, Pages must use **GitHub Actions** as its source. The public URL is normally:
 
 `https://<owner>.github.io/temp-zero-inode-839/`

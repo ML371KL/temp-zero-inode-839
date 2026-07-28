@@ -21,8 +21,23 @@ import {
 // this module alone would keep being served from cache.
 } from "./charts.js?v=20260727-9";
 
+/*
+ * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
+ * carry frame-ancestors — so the no-framing rule lives here instead. Inside someone
+ * else's frame the page empties itself and stops: no unlock form, no decryption,
+ * nothing for a clickjacking overlay to harvest.
+ */
+if (window.top !== window.self) {
+  document.documentElement.innerHTML = "";
+  throw new Error("Portfolio Ledger не работает внутри фрейма.");
+}
+
 const SUPPORTED_SCHEMA_VERSIONS = [2, 3];
 const SUPPORTED_ENVELOPE_VERSIONS = [1, 2];
+// The additional authenticated data the pipeline binds into every envelope. It is a
+// constant of the page, never read from the envelope: an envelope vouching for its
+// own aad field authenticates nothing, since any envelope agrees with itself.
+const EXPECTED_AAD = "temp-zero-inode-839:portfolio:v1";
 // A saved key is a standing grant of access to the whole portfolio from this browser
 // profile. It expires so that a device left behind stops being a key eventually.
 const DEVICE_KEY_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -38,7 +53,6 @@ const state = {
   sortDirection: null,
   refreshTimer: null,
   searchTimer: null,
-  alertDrafts: new Map(),
   charts: new Map(),
   // The table is the default: it is the exact statement of what the number is made
   // of, and the chart is the illustration of it.
@@ -314,11 +328,20 @@ async function deriveKey(password, envelope) {
 }
 
 async function decryptEnvelope(envelope, key) {
+  // Decryption runs against the page's own constant. The declared aad is only
+  // checked first so a wrong envelope fails with its real reason instead of the
+  // generic authentication error a mismatched AAD would produce below.
+  const aad = new TextEncoder().encode(EXPECTED_AAD);
+  const declared = bytesFromBase64(envelope.cipher.aad);
+  if (declared.length !== aad.length
+    || declared.some((byte, index) => byte !== aad[index])) {
+    throw new Error("Конверт не для этой страницы.");
+  }
   const decrypted = await crypto.subtle.decrypt(
     {
       name: "AES-GCM",
       iv: bytesFromBase64(envelope.cipher.iv),
-      additionalData: bytesFromBase64(envelope.cipher.aad),
+      additionalData: aad,
       tagLength: 128,
     },
     key,
@@ -464,7 +487,7 @@ function formatMoney(value, currency = "USD", showCode = null, digits = 2) {
   const code = String(currency || "USD").toUpperCase();
   const withCode = showCode === null ? code !== "USD" : showCode;
   const formatter = moneyFormatter(code, withCode, digits);
-  if (!formatter) return `${formatNumber(parsed, digits)} ${code}`;
+  if (!formatter) return `${formatNumber(parsed, digits)} ${escapeHtml(code)}`;
   return formatter.format(parsed);
 }
 
@@ -498,7 +521,12 @@ function quantityCell(value) {
 
 function perShareDividend(cycle, currency) {
   const total = numberValue(cycle.dividendsNet);
-  const quantity = numberValue(cycle.entryQuantityTotal);
+  // Everything that entered the position earns the payout, bought or handed over by
+  // a corporate action — the same denominator the entry average divides by. GGB's
+  // cycle 2 collected 1661.43 on 5300 bought plus 780 from a stock dividend, and
+  // dividing by the 5300 alone overstated the per-share payout by 15 %.
+  const quantity = (numberValue(cycle.entryQuantityTotal) || 0)
+    + (numberValue(cycle.corporateInQuantity) || 0);
   if (!total || !quantity) return null;
   const perShare = total / quantity;
   const magnitude = Math.abs(perShare);
@@ -680,7 +708,7 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 // because having to re-fold six panels on every visit is worse than not having the
 // control at all.
 const COLLAPSE_KEY = "portfolio-ledger:collapsed";
-const COLLAPSIBLE = ["hero", "buildup", "timeline", "allocation", "extremes", "account", "issues"];
+const COLLAPSIBLE = ["hero", "buildup", "timeline", "allocation", "extremes", "quality", "income", "account", "issues"];
 
 function collapsedSet() {
   try {
@@ -917,6 +945,9 @@ function renderHero(payload) {
   // others knocks the row out of line, and the plate beside it already says what the
   // page is showing.
   const returnRate = scope.narrowed ? scope.moneyWeighted : performance.moneyWeightedReturn;
+  // "N из M" read as "N of M positions", but M was the row count — open positions
+  // plus every instrument ever closed. Naming the two parts is what the number means.
+  const closedCount = (scope.narrowed ? scope.rows.length : rows.length) - openCount;
   const facts = [
     ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
       contributions === null ? missingHint : ""],
@@ -924,7 +955,7 @@ function renderHero(payload) {
       netAssetValue === null ? (payload.accountIdentity ? "нет секции Cash Report" : missingHint) : ""],
     ["Годовая доходность, XIRR", formatPercent(returnRate), pnlClass(returnRate),
       numberValue(returnRate) === null && !scope.narrowed ? missingHint : ""],
-    ["Открытых позиций", `${openCount} из ${scope.narrowed ? scope.rows.length : rows.length}`, "", ""],
+    ["Позиции", `${openCount} открытых · ${closedCount} закрытых историй`, "", ""],
   ];
 
   byId("heroPanel").innerHTML = `
@@ -1307,6 +1338,237 @@ function extremeRows(payload) {
   return [...scored.slice(0, 7), ...scored.slice(-7)];
 }
 
+/* ---------------------------------------------------------- trade quality --- */
+
+/**
+ * Closed cycles of the visible slice, judged one by one. A cycle's verdict is its
+ * whole result — realised price movement, the dividends it earned, the fees it
+ * paid — the same `totalResultUsd` the cycle card prints. Anything within half a
+ * cent of zero is a scratch, neither win nor loss.
+ */
+function tradeQualityModel() {
+  const rows = scopedRows();
+  const closed = [];
+  for (const row of rows) {
+    for (const cycle of row.cycles || []) {
+      if (!cycle.closedAt) continue;
+      const fallback = (numberValue(cycle.realizedPnlUsd) || 0)
+        + (numberValue(cycle.dividendsNetUsd) || 0);
+      const result = numberValue(cycle.totalResultUsd) ?? fallback;
+      const openedAt = timeValue(cycle.openedAt);
+      const closedAt = timeValue(cycle.closedAt);
+      closed.push({
+        symbol: String(row.symbol || row.conid),
+        result,
+        // Whole days held, floored: a cycle opened Monday noon and closed Friday
+        // morning was held four days, not five calendar dates.
+        days: openedAt !== null && closedAt !== null
+          ? Math.floor((closedAt - openedAt) / 86_400_000)
+          : null,
+      });
+    }
+  }
+  if (!closed.length) return null;
+
+  const wins = closed.filter((cycle) => cycle.result >= 0.005);
+  const losses = closed.filter((cycle) => cycle.result <= -0.005);
+  const sum = (items) => items.reduce((total, item) => total + item.result, 0);
+  const median = (values) => {
+    if (!values.length) return null;
+    const sorted = [...values].sort((left, right) => left - right);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  };
+  const holdDays = (items) => median(items
+    .map((item) => item.days)
+    .filter((value) => value !== null));
+  const grossProfit = sum(wins);
+  const grossLoss = sum(losses);
+
+  // Costs are the whole slice's, open cycles included: a commission is paid whether
+  // or not the cycle has closed yet. The realised figure is grossed back up by the
+  // costs already deducted from it, so the ratio reads "of what the trades made
+  // before costs, this much went to the broker and the taxman".
+  const rowSum = (field) => rows.reduce(
+    (total, row) => total + (numberValue(row[field]) || 0), 0);
+  const costs = rowSum("commissionsUsd") + rowSum("transactionTaxesUsd");
+  const grossRealized = rowSum("realizedPnlUsd") + costs;
+
+  // Concentration is by name, never by table row: an instrument traded long and
+  // short is two rows but one recurring decision.
+  const bySymbol = new Map();
+  for (const cycle of closed) {
+    bySymbol.set(cycle.symbol, (bySymbol.get(cycle.symbol) || 0) + cycle.result);
+  }
+  const positive = [...bySymbol.values()]
+    .filter((value) => value > 0)
+    .sort((left, right) => right - left);
+  const positiveTotal = positive.reduce((total, value) => total + value, 0);
+  let concentrated = 0;
+  let running = 0;
+  for (const value of positive) {
+    running += value;
+    concentrated += 1;
+    if (running >= positiveTotal * 0.8) break;
+  }
+
+  return {
+    count: closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    flats: closed.length - wins.length - losses.length,
+    averageWin: wins.length ? grossProfit / wins.length : null,
+    medianWin: median(wins.map((item) => item.result)),
+    averageLoss: losses.length ? grossLoss / losses.length : null,
+    medianLoss: median(losses.map((item) => item.result)),
+    profitFactor: grossLoss ? grossProfit / Math.abs(grossLoss) : null,
+    expectancy: sum(closed) / closed.length,
+    medianHoldWin: holdDays(wins),
+    medianHoldLoss: holdDays(losses),
+    costs,
+    grossRealized,
+    concentrated,
+    positiveNames: positive.length,
+  };
+}
+
+function renderQualityPanel() {
+  const quality = tradeQualityModel();
+  byId("qualityPanel").hidden = !quality;
+  if (!quality) {
+    byId("qualityStats").innerHTML = "";
+    return;
+  }
+  const days = (value) => (value === null ? "—" : `${formatNumber(value, 1)} дн.`);
+  const tableRows = [
+    { label: "Закрытых циклов", value: formatNumber(quality.count, 0) },
+    {
+      label: "Прибыльных / убыточных / в ноль",
+      value: `${formatNumber(quality.wins, 0)} / ${formatNumber(quality.losses, 0)} / ${formatNumber(quality.flats, 0)}`,
+    },
+    { label: "Доля прибыльных", value: percentLabel(quality.wins / quality.count) },
+    { label: "Средняя прибыль", value: formatSignedUsd(quality.averageWin), tone: "positive" },
+    { label: "Медианная прибыль", value: formatSignedUsd(quality.medianWin), tone: "positive" },
+    { label: "Средний убыток", value: formatSignedUsd(quality.averageLoss), tone: "negative" },
+    { label: "Медианный убыток", value: formatSignedUsd(quality.medianLoss), tone: "negative" },
+    {
+      label: "Profit factor, Σ прибылей / |Σ убытков|",
+      value: quality.profitFactor === null ? "—" : formatNumber(quality.profitFactor, 2),
+    },
+    {
+      label: "Матожидание на цикл",
+      value: formatSignedUsd(quality.expectancy),
+      tone: pnlClass(quality.expectancy),
+    },
+    { label: "Медианное удержание прибыльных", value: days(quality.medianHoldWin) },
+    { label: "Медианное удержание убыточных", value: days(quality.medianHoldLoss) },
+  ];
+  const notes = [
+    quality.grossRealized > 0 && quality.costs > 0
+      ? `Издержки — комиссии инструментов и налоги сделок ${formatUsd(quality.costs)}: `
+        + `${percentLabel(quality.costs / quality.grossRealized)} валового реализованного результата.`
+      : "",
+    quality.positiveNames
+      ? `80 % прибыли закрытых циклов дали ${formatNumber(quality.concentrated, 0)} имён `
+        + `из ${formatNumber(quality.positiveNames, 0)} прибыльных.`
+      : "",
+  ].filter(Boolean);
+  byId("qualityStats").innerHTML = chartTable(tableRows, { head: ["Показатель", "Значение"] })
+    + notes.map((note) => `<p class="stats-note">${escapeHtml(note)}</p>`).join("");
+}
+
+/* ------------------------------------------------------- dividend income --- */
+
+/**
+ * Dividend and interest income by year, dated the way the cumulative chart dates
+ * them: a dividend belongs to the position that earned it, on its ex-date; interest
+ * is the account's, on the day it was credited. This block deliberately ignores the
+ * asset-class scope — income history is a property of the whole account.
+ */
+function renderIncomePanel(payload) {
+  const dividendYears = new Map();
+  const payers = new Map();
+  let dividendTotal = 0;
+  for (const row of payload.rows || []) {
+    const net = numberValue(row.dividendsNetUsd) || 0;
+    if (net) {
+      const symbol = String(row.symbol || row.conid);
+      payers.set(symbol, (payers.get(symbol) || 0) + net);
+    }
+    for (const cycle of row.cycles || []) {
+      for (const event of cycle.cashEvents || []) {
+        if (!["DIVIDEND", "WITHHOLDING_TAX"].includes(String(event.category || ""))) continue;
+        const year = String(event.exDate || event.timestamp || "").slice(0, 4);
+        if (!year) continue;
+        const amount = numberValue(event.amountUsd) || 0;
+        dividendYears.set(year, (dividendYears.get(year) || 0) + amount);
+        dividendTotal += amount;
+      }
+    }
+  }
+  const interestYears = new Map();
+  let interestTotal = 0;
+  for (const flow of payload.accountCashFlows || []) {
+    if (String(flow.category || "") !== "INTEREST") continue;
+    const year = String(flow.timestamp || "").slice(0, 4);
+    if (!year) continue;
+    const amount = numberValue(flow.amountUsd) || 0;
+    interestYears.set(year, (interestYears.get(year) || 0) + amount);
+    interestTotal += amount;
+  }
+
+  const years = [...new Set([...dividendYears.keys(), ...interestYears.keys()])].sort();
+  byId("incomePanel").hidden = !years.length;
+  if (!years.length) {
+    byId("incomeStats").innerHTML = "";
+    return;
+  }
+
+  const yearsTable = `
+    <table class="mini-table income-years">
+      <thead><tr>
+        <th>Год</th>
+        <th class="numeric">Дивиденды net, по дате отсечки</th>
+        <th class="numeric">Проценты брокера</th>
+      </tr></thead>
+      <tbody>
+        ${years.map((year) => `<tr>
+          <th scope="row">${escapeHtml(year)}</th>
+          <td class="numeric">${formatUsd(dividendYears.get(year) || 0)}</td>
+          <td class="numeric">${formatUsd(interestYears.get(year) || 0)}</td>
+        </tr>`).join("")}
+        <tr class="is-total">
+          <th scope="row">Всего</th>
+          <td class="numeric">${formatUsd(dividendTotal)}</td>
+          <td class="numeric">${formatUsd(interestTotal)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+  const top = [...payers.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 5);
+  const topTable = chartTable(
+    top.map(([symbol, value]) => ({ label: symbol, value: formatUsd(value) })),
+    { head: ["Плательщик", "Net за всё время"] },
+  );
+
+  const gross = numberValue(payload.totals?.dividendsGrossUsd);
+  const withheld = numberValue(payload.totals?.withholdingTaxUsd);
+  const note = gross && withheld !== null
+    ? `Удержано у источника: ${percentLabel(Math.abs(withheld) / gross)} `
+      + `(${formatUsd(Math.abs(withheld))} из ${formatUsd(gross)}).`
+    : "";
+
+  byId("incomeStats").innerHTML = `
+    <div class="income-grid">
+      <div><h3>По годам</h3>${yearsTable}</div>
+      <div><h3>Топ-5 плательщиков</h3>${topTable}</div>
+    </div>
+    ${note ? `<p class="stats-note">${escapeHtml(note)}</p>` : ""}
+  `;
+}
+
 /* ----------------------------------------------------------------- charts --- */
 
 /**
@@ -1352,7 +1614,7 @@ function updateTimelineNote() {
   const percent = state.timelineMode === "percent" && timeline?.percentAvailable;
   byId("timelineNote").textContent = percent
     ? `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`
-    : (state.timelineCoverage || "");
+    : [state.timelineCoverage || "", state.timelineBridge || ""].filter(Boolean).join(" ");
 }
 
 function renderCharts() {
@@ -1461,6 +1723,38 @@ function prepareCharts(payload) {
     // the account-level items are on the line too — everything except the unrealised.
     ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
+
+  /*
+   * The line ends short of the headline on purpose: the unrealised has no date, the
+   * open currency balances have realised nothing, and the closing revaluation
+   * belongs to today. The bridge states the exact gap term by term — and is only
+   * printed when the payload's own components reproduce the headline to a dollar,
+   * so a narrowed scope that drops unrealised money silently drops the line too.
+   */
+  state.timelineBridge = "";
+  const scope = scopeSummary(payload);
+  const lineEnd = timeline.points.length
+    ? timeline.points[timeline.points.length - 1].value
+    : null;
+  const unrealized = numberValue(payload.totals?.unrealizedPnlUsd);
+  const revaluation = numberValue(payload.accountIdentity?.differenceUsd);
+  const accountResult = numberValue(payload.accountIdentity?.accountResultUsd);
+  const headline = scope.narrowed ? scope.result : accountResult;
+  const currencyOpen = numberValue(payload.accountCash?.currencyOpenUsd);
+  if (lineEnd !== null && unrealized !== null && revaluation !== null
+    && headline !== null && currencyOpen !== null
+    && Math.abs(lineEnd + unrealized + currencyOpen + revaluation - headline) <= 1) {
+    // The residual is what the equation itself leaves, checked above against the
+    // payload's open-currency figure; printing the residual keeps the sum exact.
+    const residual = headline - lineEnd - unrealized - revaluation;
+    const term = (label, value) =>
+      `${value < 0 ? "−" : "+"} ${label} ${formatUsd(Math.abs(value))}`;
+    state.timelineBridge = `Конец линии ${formatUsd(lineEnd)} `
+      + `${term("нереализованный P&L", unrealized)} `
+      + `${term("валютные остатки", residual)} `
+      + `${term("переоценка", revaluation)} `
+      + `= ${formatUsd(headline)} в шапке.`;
+  }
   updateTimelineNote();
 
   // The percent view divides by dated funding. Offering the button when there is
@@ -1497,6 +1791,12 @@ function prepareCharts(payload) {
     }),
     { head: ["Составляющая", "Сумма, USD"] },
   );
+
+  // Rendered alongside the other derived blocks: the quality table follows the
+  // asset-class scope the way the composition block does, the income block by
+  // design does not, and both simply recompute on every redraw.
+  renderQualityPanel();
+  renderIncomePanel(payload);
 }
 
 byId("timelineMode").addEventListener("click", (event) => {
@@ -1858,6 +2158,17 @@ function isOpen(row) {
 }
 
 /**
+ * Whether the instrument is open today, surviving the year projection. The
+ * projection nulls the quantity because a position belongs to no year, which made
+ * `isOpen` read every projected row as closed: the open tab under a year showed a
+ * "Закрыта" pill on every row and the grouping filed them all under closed history.
+ * Openness belongs to today, so it is carried over from the source row instead.
+ */
+function isOpenNow(row) {
+  return row.openNow ?? isOpen(row);
+}
+
+/**
  * The entry column is the instrument's whole life, open or closed: the
  * quantity-weighted price across every cycle it ever had, on the same footing as the
  * money columns beside it, which have always been lifetime.
@@ -1889,10 +2200,13 @@ const SORT_ACCESSORS = {
   totalResultUsd: (row) => numberValue(row.totalResultUsd),
 };
 
+// `isOpenNow`, not `isOpen`: under a year filter the default order is what the
+// grouping walks, and grouping by a flag the sort ignores would emit a new group
+// band at every flip between an open and a closed instrument.
 function defaultRowCompare(left, right) {
-  const openDifference = Number(isOpen(right)) - Number(isOpen(left));
+  const openDifference = Number(isOpenNow(right)) - Number(isOpenNow(left));
   if (openDifference) return openDifference;
-  if (isOpen(left)) {
+  if (isOpenNow(left)) {
     return Math.abs(numberValue(right.marketValueUsd) || 0) - Math.abs(numberValue(left.marketValueUsd) || 0);
   }
   return String(right.lastCloseAt || right.cycleClosedAt || "")
@@ -1966,8 +2280,6 @@ function projectRowToYear(row, year) {
   let gross = 0;
   let withheld = 0;
   let fees = 0;
-  let commissions = 0;
-  let taxes = 0;
   // Denominators carry the contract multiplier, because the values above do: an
   // option at 1.30 on a multiplier of 100 costs 130 and must still average to 1.30.
   let entryValue = 0;
@@ -1993,8 +2305,6 @@ function projectRowToYear(row, year) {
     for (const trade of trades) {
       seen(trade.timestamp);
       realised += numberValue(trade.realizedUsd) || 0;
-      commissions += numberValue(trade.commission) || 0;
-      taxes += numberValue(trade.taxes) || 0;
       // A corporate action moves shares without a price, so it can weight no average.
       if (CORPORATE_ACTIONS.has(trade.action)) continue;
       const quantity = Math.abs(numberValue(trade.quantity) || 0);
@@ -2027,6 +2337,9 @@ function projectRowToYear(row, year) {
   return {
     ...row,
     projectedYear: year,
+    // The openness of the source row, for the status pill, the grouping and the
+    // "сейчас" cell: the projected quantity below is null and says nothing about it.
+    openNow: isOpen(row),
     cycles,
     firstTradeAt: firstAt,
     lastCloseAt: lastAt,
@@ -2052,8 +2365,13 @@ function projectRowToYear(row, year) {
     withholdingTaxUsd: withheld,
     dividendsNetUsd: dividendsNet,
     otherFeesUsd: fees,
-    commissionsUsd: commissions,
-    transactionTaxesUsd: taxes,
+    // A trade's `commission` and `taxes` are in the instrument's own currency —
+    // summed into these USD fields they printed CAD totals with a dollar sign
+    // (YGR 2023: "−315,72 $" for what is ~236 USD). There is no per-trade USD
+    // figure to re-sum and no honest rate to invent, so the year view withholds
+    // the lines; the card hides them through `optional()`.
+    commissionsUsd: null,
+    transactionTaxesUsd: null,
     totalResultUsd: realised + dividendsNet + fees,
     breakEvenStatus: "NO_OPEN_POSITION",
     breakEvenPrice: null,
@@ -2096,16 +2414,12 @@ function filteredRows() {
 
 function statusLabel(row) {
   if (row.status === "REVIEW") return "Проверить";
-  return isOpen(row) ? "Открыта" : "Закрыта";
+  return isOpenNow(row) ? "Открыта" : "Закрыта";
 }
 
 function statusClass(row) {
   if (row.status === "REVIEW") return "review";
-  return isOpen(row) ? "open" : "closed";
-}
-
-function alertDraftValue(row, side) {
-  return state.alertDrafts.get(`${rowKey(row)}:${side}`) || "";
+  return isOpenNow(row) ? "open" : "closed";
 }
 
 const BREAK_EVEN_REASONS = {
@@ -2140,25 +2454,16 @@ function breakEvenMarkup(row) {
   `;
 }
 
-function alertMarkup(row) {
+/**
+ * The break-even card and one honest sentence. The former alert-draft inputs kept
+ * half-typed prices in memory, notified nobody and pretended otherwise; native IBKR
+ * alerts do the actual job, so the card now just says so.
+ */
+function levelsMarkup(row) {
   return `
-    <div class="alert-panel">
-      <div class="alert-heading">
-        <div><h3>Ценовые алерты</h3><p>Доступны для любого инструмента из истории</p></div>
-        <span class="alert-draft-status">Черновик · сервер не подключён</span>
-      </div>
-      <div class="alert-grid">
-        <label class="alert-control buy-alert">
-          <span>Покупка <small>Ask ≤</small></span>
-          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="buy" data-row-key="${escapeHtml(rowKey(row))}" value="${escapeHtml(alertDraftValue(row, "buy"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
-        </label>
-        <label class="alert-control sell-alert">
-          <span>Продажа <small>Bid ≥</small></span>
-          <span class="alert-input-wrap"><input type="number" min="0" step="any" inputmode="decimal" data-alert-side="sell" data-row-key="${escapeHtml(rowKey(row))}" value="${escapeHtml(alertDraftValue(row, "sell"))}" placeholder="Цена" /><b>${escapeHtml(row.currency)}</b></span>
-        </label>
-        ${breakEvenMarkup(row)}
-      </div>
-      <p class="alert-footnote">Введённые уровни сохраняются только до закрытия вкладки и не отправляют уведомления. Для жёстких уровней используйте штатные алерты IBKR.</p>
+    <div class="levels-panel">
+      ${breakEvenMarkup(row)}
+      <p class="levels-note">Ценовые уровни удобнее ставить нативными алертами IBKR — они бесплатны и срабатывают, когда браузер закрыт.</p>
     </div>
   `;
 }
@@ -2208,8 +2513,13 @@ function cycleMarkup(row) {
     const soldQuantity = numberValue(cycle.exitQuantityTotal) || 0;
     const exitAverage = numberValue(cycle.averageExit);
     const partial = open && soldQuantity > 0 && exitAverage !== null;
+    // The entry price attributable to the closed part of the cycle. For a long the
+    // sold shares cost their proceeds less what they realised; a short's entry is
+    // the buyback cost plus the result — the same identity with the realisation's
+    // sign flipped, because a short realises by buying back cheaper than it sold.
+    const realizedPart = numberValue(cycle.realizedPnl) || 0;
     const soldCostPerShare = partial
-      ? (exitAverage * soldQuantity - (numberValue(cycle.realizedPnl) || 0)) / soldQuantity
+      ? (exitAverage * soldQuantity + (short ? realizedPart : -realizedPart)) / soldQuantity
       : null;
     return `
       <article class="cycle-item ${open ? "is-open" : ""}">
@@ -2222,7 +2532,7 @@ function cycleMarkup(row) {
         <div class="cycle-facts">
           ${open ? `
           <span><small${corporateNote ? ` title="${escapeHtml(corporateNote)}"` : ""}>Остаток</small><b${remainderCell.title ? ` title="${escapeHtml(remainderCell.title)}"` : ""}>${remainderCell.text}${corporateIn ? ` · ${quantityCell(corporateIn).text} по КД` : ""}</b>${
-            partial ? `<small class="cycle-sub">Продано</small><b class="cycle-sub"${exitCell.title ? ` title="${escapeHtml(exitCell.title)}"` : ""}>${exitCell.text}</b>` : ""
+            partial ? `<small class="cycle-sub">${escapeHtml(closedLabel)}</small><b class="cycle-sub"${exitCell.title ? ` title="${escapeHtml(exitCell.title)}"` : ""}>${exitCell.text}</b>` : ""
           }</span>
           ` : `
           <span><small${corporateNote ? ` title="${escapeHtml(corporateNote)}"` : ""}>${
@@ -2242,12 +2552,14 @@ function cycleMarkup(row) {
           <span><small${partial ? ' title="AVCO того, что осталось в позиции, а не всего купленного за цикл"' : ""}>Средний вход</small><b>${
             formatMoney(cycle.averageEntry, row.currency, true)
           }</b>${
-            partial ? `<small class="cycle-sub" title="Во что обошлись проданные акции: выручка за вычетом того, что они принесли">Проданных</small><b class="cycle-sub">${formatMoney(soldCostPerShare, row.currency, true)}</b>` : ""
+            partial ? `<small class="cycle-sub" title="${escapeHtml(short
+              ? "По какой цене были открыты выкупленные контракты: затраты на выкуп плюс то, что они принесли"
+              : "Во что обошлись проданные акции: выручка за вычетом того, что они принесли")}">${escapeHtml(closedLabel)}</small><b class="cycle-sub">${formatMoney(soldCostPerShare, row.currency, true)}</b>` : ""
           }</span>
           <span><small>Средний выход</small><b${open && !partial ? ' title="Цикл открыт и ничего ещё не продано"' : ""}>${
             open ? '<span class="muted-value">—</span>' : formatMoney(cycle.averageExit, row.currency, true)
           }</b>${
-            partial ? `<small class="cycle-sub">Проданных</small><b class="cycle-sub">${formatMoney(cycle.averageExit, row.currency, true)}</b>` : ""
+            partial ? `<small class="cycle-sub">${escapeHtml(closedLabel)}</small><b class="cycle-sub">${formatMoney(cycle.averageExit, row.currency, true)}</b>` : ""
           }</span>
           <span><small>Дивиденды на акцию</small><b${dividend ? ` title="За цикл получено ${escapeHtml(dividend.total)}"` : ""}>${
             dividend ? dividend.text : '<span class="muted-value">—</span>'
@@ -2310,7 +2622,7 @@ function detailHtml(row) {
           row.projectedYear
             ? `<p class="detail-note">Показаны циклы, затронутые ${escapeHtml(row.projectedYear)} годом. Цифры внутри цикла — за весь цикл целиком, а не за год.</p>`
             : ""
-        }<div class="cycle-list">${cycleMarkup(row)}</div>${alertMarkup(row)}</section>
+        }<div class="cycle-list">${cycleMarkup(row)}</div>${levelsMarkup(row)}</section>
       </div>
     </td></tr>
   `;
@@ -2347,7 +2659,7 @@ function rowHtml(row, scale) {
     quote.marketTime ? formatDateShort(quote.marketTime, "time").replace(", ", " ") : null,
     FRESHNESS_LABELS[String(quote.freshness || "").toLowerCase()],
   ].filter(Boolean).join(" · ");
-  const open = isOpen(row);
+  const open = isOpenNow(row);
   // The instrument's whole life, not the latest cycle's: first trade to last close,
   // which is the scope the money columns to the right already report on. Both dates on
   // one line ran past the column and got cut mid-number; the status column beside it
@@ -2367,7 +2679,7 @@ function rowHtml(row, scale) {
       <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}</span></td>
       <td class="numeric quantity-cell">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
-      <td class="numeric">${open ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
+      <td class="numeric">${open && row.openNow === undefined ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
       <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
       <td class="numeric">${formatUsdCell(row.marketValueUsd)}${magnitudeBar(row.marketValueUsd, scale.marketValue, "neutral")}</td>
       <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatUsdCell(row.unrealizedPnlUsd)}</td>
@@ -2404,12 +2716,12 @@ function renderRows() {
   // Grouping only where the order is the default one: under an explicit sort a
   // heading claiming "open positions" would sit above rows that are not grouped.
   const grouped = !state.sortKey && state.activeTab === "all";
-  const openCount = grouped ? rows.filter(isOpen).length : 0;
+  const openCount = grouped ? rows.filter(isOpenNow).length : 0;
   let previousGroup = null;
   const markup = [];
   for (const row of rows) {
     if (grouped) {
-      const group = isOpen(row) ? "open" : "closed";
+      const group = isOpenNow(row) ? "open" : "closed";
       if (group !== previousGroup) {
         markup.push(groupRow(group, group === "open" ? openCount : rows.length - openCount));
         previousGroup = group;
@@ -2491,7 +2803,6 @@ function toggleRow(key) {
 
 // One delegated listener for the whole table instead of one per row per render.
 portfolioBody.addEventListener("click", (event) => {
-  if (event.target.closest("input, label, .alert-panel")) return;
   toggleRow(event.target.closest("tr.data-row")?.dataset.rowKey);
 });
 
@@ -2501,14 +2812,6 @@ portfolioBody.addEventListener("keydown", (event) => {
   if (!row) return;
   event.preventDefault();
   toggleRow(row.dataset.rowKey);
-});
-
-portfolioBody.addEventListener("input", (event) => {
-  const input = event.target.closest("input[data-alert-side]");
-  if (!input) return;
-  const key = `${input.dataset.rowKey}:${input.dataset.alertSide}`;
-  if (input.value) state.alertDrafts.set(key, input.value);
-  else state.alertDrafts.delete(key);
 });
 
 /* ----------------------------------------------------------------- issues --- */
@@ -2654,26 +2957,54 @@ function showDashboard(payload, key) {
 const CLEARED_ON_LOCK = [
   "kpiGrid", "issuesList", "accountIdentity", "dataStatus", "totalsCheck",
   "heroPanel", "buildupChart", "buildupTable", "timelineChart", "yearChart",
-  "classStrip", "allocationChart", "extremesChart",
+  "classStrip", "allocationChart", "extremesChart", "qualityStats", "incomeStats",
+  "timelineNote", "allocationNote", "kpiContext", "resultCount",
 ];
 
 /**
  * Locking has to remove the plaintext from the page, not just hide the container:
  * with the markup still in the DOM the whole portfolio was one devtools inspection
- * away, and a reload restored it outright.
+ * away, and a reload restored it outright. The same applies to everything derived
+ * from the payload — the search text, the year and currency option lists, the
+ * asset-class menu and the cached scope summary all say what the portfolio holds.
  */
 function lockDashboard(message = "") {
   state.payload = null;
   state.cryptoKey = null;
+  // A debounced search or a lingering refresh label firing after the lock would
+  // call render paths against a null payload — a TypeError in a timer at best.
+  if (state.searchTimer) {
+    window.clearTimeout(state.searchTimer);
+    state.searchTimer = null;
+  }
+  if (state.refreshTimer) {
+    window.clearTimeout(state.refreshTimer);
+    state.refreshTimer = null;
+  }
   state.expanded.clear();
-  state.alertDrafts.clear();
   state.charts.clear();
   state.sortKey = null;
   state.sortDirection = null;
+  state.timelineCoverage = "";
+  state.timelineBridge = "";
+  scopeCache = null;
   portfolioBody.innerHTML = "";
+  byId("searchInput").value = "";
+  // The option lists were built from the payload, so they are emptied the same way
+  // they were filled — down to the one default option `populateSelect` always writes.
+  populateSelect(byId("currencyFilter"), [], "Все валюты");
+  populateSelect(byId("yearFilter"), [], "Любой год");
+  // Mirrors `renderScopeFilter` with nothing to show: no class checkboxes, the
+  // default summary, no narrowed highlight, and the popover closed.
+  byId("assetScopeOptions").innerHTML = "";
+  const scopeLabelNode = byId("assetScopeSummary");
+  scopeLabelNode.textContent = "Все классы";
+  scopeLabelNode.closest("summary").classList.remove("is-narrowed");
+  byId("assetScopeAll").hidden = true;
+  byId("assetScope").open = false;
   for (const id of CLEARED_ON_LOCK) byId(id).innerHTML = "";
   for (const id of ["accountPanel", "issuesPanel", "totalsCheck", "buildupPanel",
-    "timelinePanel", "allocationPanel", "extremesPanel"]) {
+    "timelinePanel", "allocationPanel", "extremesPanel", "qualityPanel", "incomePanel"]) {
     byId(id).hidden = true;
   }
   tooltip.hidden = true;
@@ -2732,6 +3063,7 @@ byId("refreshButton").addEventListener("click", async () => {
   const button = byId("refreshButton");
   const label = byId("refreshButtonLabel");
   const feedback = byId("refreshFeedback");
+  if (!state.cryptoKey) return;
   const previousGeneratedAt = state.payload?.generatedAt || "";
   if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
   button.disabled = true;
@@ -2741,7 +3073,12 @@ byId("refreshButton").addEventListener("click", async () => {
   feedback.textContent = "Загружаем свежий снимок…";
   try {
     await loadEnvelope({ bypassCache: true });
+    // Locking can land between any two awaits here, and the tail of this handler
+    // would otherwise re-render the whole portfolio into a page that already shows
+    // the password form. Checking the key after every await makes the lock final.
+    if (!state.cryptoKey) return;
     const payload = await decryptEnvelope(state.envelope, state.cryptoKey);
+    if (!state.cryptoKey) return;
     renderDashboard(payload);
     const changed = Boolean(payload.generatedAt && payload.generatedAt !== previousGeneratedAt);
     label.textContent = changed ? "Обновлено" : "Актуально";

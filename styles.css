@@ -18,7 +18,9 @@
 
   --ink: #e9f0f6;
   --ink-2: #9db1c3;
-  --ink-3: #6c8092;
+  /* Same slate tone, lifted for WCAG AA: 5.07:1 on --surface and 4.68:1 on
+     --surface-raised (the old #6c8092 sat at 4.37 and 4.04). */
+  --ink-3: #778b9d;
 
   --accent: #6fdcc0;
   --accent-ink: #06231c;
@@ -72,7 +74,9 @@
 
   --ink: #0e1a26;
   --ink-2: #4a5f72;
-  --ink-3: #6f8496;
+  /* Same slate tone, darkened for WCAG AA: 4.99:1 on --surface and 4.60:1 on
+     --surface-raised (the old #6f8496 sat at 3.88 and 3.58). */
+  --ink-3: #5d7285;
 
   --accent: #0f8c70;
   --accent-ink: #ffffff;
@@ -598,6 +602,21 @@ button { color: inherit; }
 .mini-table td.numeric { width: 44%; white-space: nowrap; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .mini-table tr.is-total th, .mini-table tr.is-total td { color: var(--ink); font-weight: 700; background: var(--surface-raised); }
 
+/* ====================================================== quality and income */
+
+/* Sentences under a stats table: prose, not figures, so they wrap freely and
+   cannot overflow the card the way a nowrap numeric cell could. */
+.stats-note { margin: 12px 0 0; color: var(--ink-2); font-size: 12px; line-height: 1.55; }
+/* Two tables side by side where the card is wide enough, stacked where it is not.
+   Cells keep min-width: 0 and overflow: hidden so neither table can push the page
+   sideways on a narrow viewport. */
+.income-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; align-items: start; }
+.income-grid > div { min-width: 0; overflow: hidden; }
+.income-grid h3 { margin: 0 0 8px; color: var(--ink-3); font: 700 11px/1 var(--sans); text-transform: uppercase; letter-spacing: 0.09em; }
+/* Three columns share the width evenly; the generic 44 % value-column width is for
+   the two-column tables and would put 88 % into two of these three. */
+.income-years td.numeric { width: auto; }
+
 /* =================================================================== account */
 
 .account-panel .panel-body { display: grid; gap: 14px; }
@@ -854,28 +873,16 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .cycle-facts > span > small.cycle-sub { margin-top: 7px; }
 .cycle-facts > span > b.cycle-sub { color: var(--ink-2); }
 
-.alert-panel { max-width: 660px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
-.alert-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
-.alert-heading h3 { margin: 0 0 3px; }
-.alert-heading p, .alert-footnote { margin: 0; color: var(--ink-3); font-size: 11px; line-height: 1.45; }
-.alert-draft-status { flex: 0 0 auto; padding: 4px 8px; border-radius: 99px; color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
-.alert-grid { display: grid; grid-template-columns: minmax(120px, 0.75fr) minmax(120px, 0.75fr) minmax(170px, 1fr); gap: 7px; }
-.alert-control, .break-even-card { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
-.alert-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: text; }
-.alert-control > span:first-child { color: var(--ink); font: 600 12px/1.25 var(--sans); }
-.alert-control small { display: block; margin-top: 2px; color: var(--ink-3); font-size: 11px; font-weight: 500; }
-.buy-alert { border-color: color-mix(in srgb, var(--positive) 28%, var(--line)); }
-.sell-alert { border-color: color-mix(in srgb, var(--info) 28%, var(--line)); }
-.alert-input-wrap { min-width: 0; display: flex; align-items: center; gap: 4px; }
-.alert-input-wrap input { width: 84px; min-height: 44px; border: 1px solid var(--line); border-radius: 7px; outline: 0; padding: 7px 8px; color: var(--ink); background: var(--surface-sunken); font: 500 16px/1 var(--mono); }
-.alert-input-wrap input:focus { border-color: var(--accent); }
-.alert-input-wrap b { color: var(--ink-3); font-size: 11px; font-weight: 600; }
+/* The break-even card and the one-line pointer to native IBKR alerts, which is all
+   that remains of the former alert-draft panel. */
+.levels-panel { max-width: 660px; margin-top: 12px; display: grid; gap: 8px; }
+.levels-note { margin: 0; color: var(--ink-3); font-size: 11px; line-height: 1.45; }
+.break-even-card { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
 .break-even-card span, .break-even-card strong, .break-even-card small { display: block; }
 .break-even-card span { color: var(--ink-3); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 .break-even-card strong { margin-top: 4px; color: var(--accent); font: 700 13px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
 .break-even-card small { margin-top: 3px; color: var(--ink-2); font-size: 11px; line-height: 1.4; }
 .break-even-card.unavailable strong { color: var(--ink-3); }
-.alert-footnote { margin-top: 7px; }
 .review-box { margin-top: 12px; padding: 10px; border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent); border-radius: 9px; color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, transparent); font: 400 12px/1.6 var(--sans); }
 .empty-state { padding: 50px 20px; color: var(--ink-3); text-align: center; font-size: 13px; }
 
@@ -915,8 +922,6 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   .hero-panel { grid-template-columns: 1fr; }
   .panel-row { grid-template-columns: 1fr; }
   .detail-wrap { grid-template-columns: 1fr; }
-  .alert-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .break-even-card { grid-column: 1 / -1; }
 }
 
 @media (max-width: 760px) {
@@ -962,7 +967,7 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   .detail-grid, .cycle-facts { grid-template-columns: 1fr 1fr; }
   .detail-item strong { font-size: 11.5px; }
   .cycle-item header strong { margin-left: 0; width: 100%; }
-  .alert-panel { max-width: none; }
+  .levels-panel { max-width: none; }
 
   /* Only the instrument stays pinned. With the total pinned as well there was almost
      no room left between them, and the columns in the middle became unreachable. */
@@ -976,9 +981,6 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   .column-money { width: 102px; }
   .column-total { width: 108px; }
   .instrument-cell { gap: 6px; }
-  .alert-heading { flex-direction: column; }
-  .alert-grid { grid-template-columns: 1fr; }
-  .break-even-card { grid-column: auto; }
   .issue-item { grid-template-columns: 60px 1fr; }
   .issue-message { grid-column: 1 / -1; }
   .page-footer { padding: 14px; }
