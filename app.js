@@ -295,19 +295,33 @@ function scopeSummary(payload) {
   const accountResult = numberValue(payload.accountIdentity?.accountResultUsd);
   const asOf = timeValue(payload.generatedAt);
   const { flows, known } = carveOutFlows(payload, excluded, asOf);
+  // With something in quarantine the account cannot be split by class at all, and a
+  // narrowed headline would be precise-looking and wrong either way. The account
+  // result is built on the broker's cash, which holds the quarantined instrument's
+  // real money; its own figures are the 1:1 fiction. Subtracting the fiction from the
+  // real leaves a number that is neither, and leaving it in puts money from a class
+  // nobody selected inside the headline — measured at 8,675 dollars on one snapshot.
+  // So a narrowed scope reports what its own instruments did and declines to state a
+  // return, and the notice above the table says how much sits outside the totals.
+  const undecomposable = state.quarantined.size > 0 && scopeNarrowed();
   const value = {
     rows,
     excluded,
     narrowed: scopeNarrowed(),
     label: scopeLabel(),
     instrumentResult,
-    result: accountResult === null ? instrumentResult : accountResult - droppedResult,
+    undecomposable,
+    result: accountResult === null || undecomposable
+      ? instrumentResult
+      : accountResult - droppedResult,
     realized: sum("realizedPnlUsd"),
     unrealized: sum("unrealizedPnlUsd"),
     dividends: sum("dividendsNetUsd"),
     fees: sum("otherFeesUsd"),
     openCount: rows.filter(isOpen).length,
-    moneyWeighted: known ? xirr(flows) : null,
+    // The solver would be fed par-rate cash flows for the quarantined instrument and
+    // would return a rate printed to a basis point. No rate is better than that one.
+    moneyWeighted: known && !undecomposable ? xirr(flows) : null,
   };
   scopeCache = { key, value };
   return value;
@@ -1148,10 +1162,17 @@ function buildupItems(payload) {
     // headline with nothing to say why.
     const residual = numberValue(payload.accountIdentity?.differenceUsd);
     if (residual) {
+      // Normally this gap is the unconverted foreign cash. With an instrument in
+      // quarantine it also holds that instrument's real money, which the totals
+      // above deliberately leave out — so it stops being "revaluation" and has to
+      // stop claiming to be.
+      const quarantined = state.quarantined.size > 0;
       items.push({
-        label: "Переоценка валютных остатков",
+        label: quarantined ? "Не отнесено к позициям" : "Переоценка валютных остатков",
         value: residual,
-        note: "непереведённые остатки в AUD, CAD, GBP и JPY стоят сегодня иначе, чем в день, когда попали на счёт",
+        note: quarantined
+          ? "переоценка непереведённых валютных остатков плюс инструменты, вынесенные за пределы итогов — см. предупреждение выше"
+          : "непереведённые остатки в AUD, CAD, GBP и JPY стоят сегодня иначе, чем в день, когда попали на счёт",
       });
     }
     items.push({
@@ -1820,7 +1841,7 @@ function prepareCharts(payload) {
     state.timelineBridge = `Конец линии ${formatUsd(lineEnd)} `
       + `${term("нереализованный P&L", unrealized)} `
       + `${term("валютные остатки", residual)} `
-      + `${term("переоценка", revaluation)} `
+      + `${term(state.quarantined.size ? "не отнесено к позициям" : "переоценка", revaluation)} `
       + `= ${formatUsd(headline)} в шапке.`;
   }
   updateTimelineNote();
