@@ -3336,6 +3336,15 @@ function lockDashboard(message = "") {
   tooltip.innerHTML = "";
   byId("refreshFeedback").textContent = "";
   byId("refreshButtonLabel").textContent = "Обновить";
+  // The percent button's tooltip explains *why* the view is withheld — "money in
+  // quarantine", "the scope is narrowed" — which is two facts about the portfolio
+  // left readable in the markup after locking. Same rule as the scope note above:
+  // locking must remove facts, and a disabled state is one too.
+  const percentButton = byId("timelineMode")?.querySelector('button[data-mode="percent"]');
+  if (percentButton) {
+    percentButton.title = "";
+    percentButton.disabled = false;
+  }
   tooltip.hidden = true;
   dashboardView.hidden = true;
   unlockView.hidden = false;
