@@ -1306,8 +1306,17 @@ function realisedTimeline(payload) {
   // an asset class, so they stay whatever the scope is — the same rule the
   // composition block follows. Unrealised P&L is the one thing that cannot be here:
   // it would need the market value of every position on every past day.
-  for (const flow of payload.accountCashFlows || []) {
-    add(timeValue(flow.timestamp), numberValue(flow.amountUsd) || 0);
+  //
+  // The exception is the case where the composition block itself stops at the
+  // instruments: with money in quarantine and a scope narrowed, the account cannot
+  // be split by class at all. Carrying the account-level flows here while the
+  // composition drops them left the two blocks nearly twenty thousand dollars
+  // apart, each captioned as though it held the same thing.
+  const accountLevelBelongsHere = !scopeSummary(payload).undecomposable;
+  if (accountLevelBelongsHere) {
+    for (const flow of payload.accountCashFlows || []) {
+      add(timeValue(flow.timestamp), numberValue(flow.amountUsd) || 0);
+    }
   }
 
   const months = [...buckets.entries()].sort((left, right) => left[0] - right[0]);
@@ -1853,12 +1862,16 @@ function prepareCharts(payload) {
   const covered = Math.abs(timeline.expected) > 1
     ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
     : true;
+  // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
+  // which position earned it; the payment can land weeks later and in another year.
+  // Sales are dated individually, not at the close of the cycle they belong to. The
+  // account-level items are on the line too — except in the one case where the
+  // composition block drops them as well, and then the caption must not promise them.
+  const accountLevelOnLine = !scopeSummary(payload).undecomposable;
   state.timelineCoverage = covered
-    // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
-    // which position earned it; the payment can land weeks later and in another year.
-    // Sales are dated individually, not at the close of the cycle they belong to, and
-    // the account-level items are on the line too — everything except the unrealised.
-    ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
+    ? (accountLevelOnLine
+      ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
+      : "Продажи и дивиденды по отсечке выбранных инструментов — по своим датам. Проценты брокера, сборы по счёту и FX-конверсии принадлежат счёту целиком и в этот срез не входят; нереализованный P&L не входит тоже.")
     : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
 
   /*
@@ -1933,11 +1946,16 @@ function prepareCharts(payload) {
   // account-level rows in this case, and a block that simply ends early looks like
   // data went missing rather than like a figure was declined.
   const buildupScope = scopeSummary(payload);
+  // Tolerant of an absent node: a visitor can hold a cached index.html while the
+  // browser fetches a newer app.js, and a hard `byId(...).hidden` there threw inside
+  // the render, where the catch reported it as a wrong password.
   const buildupNote = byId("buildupScopeNote");
-  buildupNote.hidden = !buildupScope.undecomposable;
-  buildupNote.textContent = buildupScope.undecomposable
-    ? "Пока часть инструментов вынесена за пределы итогов, счёт по классам не раскладывается: здесь только выбранные инструменты. Проценты брокера, сборы по счёту и валютные конверсии принадлежат счёту целиком и показаны, когда выбраны все классы."
-    : "";
+  if (buildupNote) {
+    buildupNote.hidden = !buildupScope.undecomposable;
+    buildupNote.textContent = buildupScope.undecomposable
+      ? "Пока часть инструментов вынесена за пределы итогов, счёт по классам не раскладывается: здесь только выбранные инструменты. Проценты брокера, сборы по счёту и валютные конверсии принадлежат счёту целиком и показаны, когда выбраны все классы."
+      : "";
+  }
 
   // Rendered alongside the other derived blocks: the quality table follows the
   // asset-class scope the way the composition block does, the income block by
@@ -3239,7 +3257,12 @@ function lockDashboard(message = "") {
   scopeLabelNode.closest("summary").classList.remove("is-narrowed");
   byId("assetScopeAll").hidden = true;
   byId("assetScope").open = false;
-  for (const id of CLEARED_ON_LOCK) byId(id).innerHTML = "";
+  // Skips an id the document does not have: locking must clear what is there, not
+  // throw part-way through and leave the rest of the plaintext on the page.
+  for (const id of CLEARED_ON_LOCK) {
+    const node = byId(id);
+    if (node) node.innerHTML = "";
+  }
   for (const id of ["accountPanel", "issuesPanel", "totalsCheck", "buildupPanel",
     "timelinePanel", "allocationPanel", "extremesPanel", "qualityPanel", "incomePanel",
     "quarantineNotice"]) {
