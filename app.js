@@ -318,7 +318,9 @@ function scopeSummary(payload) {
     unrealized: sum("unrealizedPnlUsd"),
     dividends: sum("dividendsNetUsd"),
     fees: sum("otherFeesUsd"),
-    openCount: rows.filter(isOpen).length,
+    // No `openCount` here on purpose. It counted the trusted rows, the hero read it for
+    // the "N открытых · M закрытых" pair, and the pair describes what the table lists —
+    // quarantined rows included. Leaving the field would leave the wrong one to hand.
     // The solver would be fed par-rate cash flows for the quarantined instrument and
     // would return a rate printed to a basis point. No rate is better than that one.
     moneyWeighted: known && !undecomposable ? xirr(flows) : null,
@@ -825,6 +827,18 @@ const AGGREGATE_FIELDS = [
   "totalResultUsd",
 ];
 
+/**
+ * Where a row field and the published total for the same money are named differently.
+ *
+ * Only one is: a row carries `otherFeesUsd`, `payload.totals` publishes the same sum as
+ * `instrumentFeesUsd`. Looking the row name up in the totals returned undefined, which
+ * `renderTotalsCheck` reads as "the pipeline did not publish this" and skips — so the
+ * fees column was never once compared. A five-thousand-dollar drift planted in
+ * `totals.instrumentFeesUsd` raised no banner at all while the same drift in
+ * `realizedPnlUsd` raised one correctly.
+ */
+const PUBLISHED_TOTAL_FIELDS = { otherFeesUsd: "instrumentFeesUsd" };
+
 function aggregateRows(rows) {
   const totals = Object.fromEntries(AGGREGATE_FIELDS.map((field) => [field, 0]));
   let partial = false;
@@ -882,7 +896,11 @@ function renderKpis(payload, rows) {
     ["Себестоимость, AVCO", ...position(totals.openBasisUsd, "По курсам на дату покупки")],
     ["Нереализованный P&L", ...position(totals.unrealizedPnlUsd, "Текущий")],
     ["Реализованный P&L", totals.realizedPnlUsd, year ? `Закрыто в ${year}` : "Закрытые объёмы"],
-    ["Чистые дивиденды", totals.dividendsNetUsd, year ? `Получено в ${year}` : "После налогов"],
+    // By ex-date, the same rule `projectRowToYear` files the event under and the same
+    // one the income block and the cumulative line follow. "Получено в 2023" was wrong
+    // for every dividend whose cash landed in the next calendar year — 36 of them in
+    // one snapshot, DOX among them: register closed 28.12.2023, paid 26.01.2024.
+    ["Чистые дивиденды", totals.dividendsNetUsd, year ? `По отсечке в ${year}` : "После налогов"],
     ["Итог по инструментам", totals.totalResultUsd,
       year ? `За ${year}, без нереализованного` : "Без процентов и валютных конверсий"],
   ];
@@ -905,28 +923,31 @@ function renderKpis(payload, rows) {
 function renderTotalsCheck(payload, rows, totals) {
   const banner = byId("totalsCheck");
   if (isFiltered(rows)) {
+    // Emptied, not merely hidden: an ERROR rendered before the filter was applied
+    // stayed in the DOM, one `hidden` toggle or one screen reader away from being
+    // read as a live verdict on figures it no longer describes.
     banner.hidden = true;
+    banner.innerHTML = "";
     return;
   }
   const published = payload.totals || {};
   const drifted = AGGREGATE_FIELDS
     .map((field) => {
+      const name = PUBLISHED_TOTAL_FIELDS[field] || field;
       const mine = totals[field];
-      const theirs = numberValue(published[field]);
+      const theirs = numberValue(published[name]);
       if (theirs === null) return null;
-      return Math.abs(mine - theirs) > 0.01 ? { field, mine, theirs } : null;
+      return Math.abs(mine - theirs) > 0.01 ? { field: name, mine, theirs } : null;
     })
     .filter(Boolean);
   banner.hidden = drifted.length === 0;
-  if (drifted.length) {
-    banner.innerHTML = drifted.map((item) => `
-      <div class="issue-item error">
-        <span class="severity">ERROR</span>
-        <span class="issue-type">${escapeHtml(item.field)}</span>
-        <span class="issue-message">Сумма по строкам ${formatUsd(item.mine)} не совпадает с опубликованным итогом ${formatUsd(item.theirs)}</span>
-      </div>
-    `).join("");
-  }
+  banner.innerHTML = drifted.map((item) => `
+    <div class="issue-item error">
+      <span class="severity">ERROR</span>
+      <span class="issue-type">${escapeHtml(item.field)}</span>
+      <span class="issue-message">Сумма по строкам ${formatUsd(item.mine)} не совпадает с опубликованным итогом ${formatUsd(item.theirs)}</span>
+    </div>
+  `).join("");
 }
 
 /* ------------------------------------------------------------------- hero --- */
@@ -963,6 +984,11 @@ function renderHero(payload) {
   // count, which describes the instruments the table lists. Counting trusted rows here
   // while `status.openPositionCount` counts all of them would subtract a quarantined
   // open position from the closed histories and leave the pair short of the table.
+  //
+  // The invariant is the whole pair, both halves of it: the count the header prints has
+  // to equal the number of rows the table would show with only the class filter on.
+  // Nothing that summarises money may be read from here — those go through
+  // `trustedRows`, and `scope` below is where they come from.
   const rows = payload.rows || [];
 
   const scope = scopeSummary(payload);
@@ -973,7 +999,14 @@ function renderHero(payload) {
   // conversions, none of which belong to an asset class.
   const headline = scope.narrowed ? scope.result : (result === null ? fallback : result);
   const contributions = numberValue(identity.netContributionsUsd);
-  const returnOnMoney = contributions ? headline / Math.abs(contributions) : null;
+  // Net contributions are the account's, and an undecomposable headline is a subset of
+  // the instruments — dividing one by the other states a return on money most of which
+  // bought something the headline does not count. The rule for a scope the quarantine
+  // makes unsplittable is to claim no return at all, and this figure is printed to a
+  // tenth of a point; zeroing the XIRR and leaving this one is half a rule.
+  const returnOnMoney = contributions && !scope.undecomposable
+    ? headline / Math.abs(contributions)
+    : null;
   const identityStatus = payload.accountIdentity ? identity.status : "NO_ACCOUNT_BLOCK";
   const [tone, identityLabel] = IDENTITY_LABELS[identityStatus] || IDENTITY_LABELS.UNAVAILABLE;
 
@@ -997,8 +1030,13 @@ function renderHero(payload) {
       { label: "Кэш", value: Math.max(0, cash), slot: 1, display: formatUsd(cash) },
     ];
 
+  // The pair counts what the table lists, narrowed or not — so the narrowed half has to
+  // come from `payload.rows` too, only class-filtered. Built on the trusted rows it
+  // silently dropped the quarantined ones, and the header said "20 открытых · 257
+  // закрытых" while the counter under the very same table said "278 из 303".
+  const listedRows = scope.narrowed ? rows.filter(inScope) : rows;
   const openCount = scope.narrowed
-    ? scope.openCount
+    ? listedRows.filter(isOpen).length
     : Number(status.openPositionCount || rows.filter(isOpen).length);
   // A dash says nothing about why. Where a figure is missing because the snapshot
   // never carried it, the tile says which section of the report would supply it.
@@ -1012,7 +1050,7 @@ function renderHero(payload) {
   const returnRate = scope.narrowed ? scope.moneyWeighted : performance.moneyWeightedReturn;
   // "N из M" read as "N of M positions", but M was the row count — open positions
   // plus every instrument ever closed. Naming the two parts is what the number means.
-  const closedCount = (scope.narrowed ? scope.rows.length : rows.length) - openCount;
+  const closedCount = listedRows.length - openCount;
   const facts = [
     ["Внесено минус выведено", formatUsd(identity.netContributionsUsd), "",
       contributions === null ? missingHint : ""],
@@ -1136,6 +1174,16 @@ function buildupItems(payload) {
       : "сумма всех строк таблицы",
   });
 
+  // The table ends here when the account cannot be split by class at all. Its closing
+  // line is captioned "то же число, что в шапке", and with something in quarantine the
+  // header prints `instrumentResult` while the line below would have printed the
+  // account result less what was dropped — the very figure the header refused as
+  // neither real nor fiction. Two different numbers on one page, one of them with a
+  // caption swearing they are the same. So no account-level rows, no residual, no
+  // second total: the last line stays the one the header agrees with, and
+  // `buildupScopeNote` says why the rest is missing.
+  if (scope.undecomposable) return items;
+
   const extras = [
     ["Проценты брокера", accountCash.interestUsd, "начислены на остаток"],
     ["Сборы по счёту", accountCash.accountFeesUsd, "подписки и обслуживание"],
@@ -1171,7 +1219,7 @@ function buildupItems(payload) {
         label: quarantined ? "Не отнесено к позициям" : "Переоценка валютных остатков",
         value: residual,
         note: quarantined
-          ? "переоценка непереведённых валютных остатков плюс инструменты, вынесенные за пределы итогов — см. предупреждение выше"
+          ? "переоценка непереведённых валютных остатков плюс реальные деньги инструментов, вынесенных за пределы итогов — см. предупреждение выше"
           : "непереведённые остатки в AUD, CAD, GBP и JPY стоят сегодня иначе, чем в день, когда попали на счёт",
       });
     }
@@ -1212,14 +1260,14 @@ function cashEventDate(event) {
 function realisedTimeline(payload) {
   const buckets = new Map();
   let dated = 0;
-  let undated = 0;
 
   const add = (time, amount) => {
     if (!amount) return;
-    if (time === null) {
-      undated += amount;
-      return;
-    }
+    // Undated money is not accumulated here on purpose. It used to be, and the
+    // figure was never read: the self-check derives the same quantity as
+    // `expected - dated`, which also catches money the line never saw at all —
+    // a source `add` was not called for cannot be counted by `add`.
+    if (time === null) return;
     const date = new Date(time);
     const key = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
     buckets.set(key, (buckets.get(key) || 0) + amount);
@@ -1258,8 +1306,17 @@ function realisedTimeline(payload) {
   // an asset class, so they stay whatever the scope is — the same rule the
   // composition block follows. Unrealised P&L is the one thing that cannot be here:
   // it would need the market value of every position on every past day.
-  for (const flow of payload.accountCashFlows || []) {
-    add(timeValue(flow.timestamp), numberValue(flow.amountUsd) || 0);
+  //
+  // The exception is the case where the composition block itself stops at the
+  // instruments: with money in quarantine and a scope narrowed, the account cannot
+  // be split by class at all. Carrying the account-level flows here while the
+  // composition drops them left the two blocks nearly twenty thousand dollars
+  // apart, each captioned as though it held the same thing.
+  const accountLevelBelongsHere = !scopeSummary(payload).undecomposable;
+  if (accountLevelBelongsHere) {
+    for (const flow of payload.accountCashFlows || []) {
+      add(timeValue(flow.timestamp), numberValue(flow.amountUsd) || 0);
+    }
   }
 
   const months = [...buckets.entries()].sort((left, right) => left[0] - right[0]);
@@ -1308,25 +1365,38 @@ function realisedTimeline(payload) {
   const scoped = scopedRows();
   const sumRows = (key) =>
     scoped.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
+  // ...and over the same *sources*. When the account-level flows are kept off the
+  // line above, adding them here makes the check disagree with the line by exactly
+  // their total — twenty thousand dollars on this account — so the page reported
+  // that much as "undated", which is false: those movements have dates, they were
+  // deliberately left out. Worse, the discrepancy swallowed the check: any genuinely
+  // undated drift smaller than it became invisible.
   const expected = sumRows("realizedPnlUsd")
     + sumRows("dividendsNetUsd")
     + sumRows("otherFeesUsd")
-    + (payload.accountCashFlows || [])
-      .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0);
+    + (accountLevelBelongsHere
+      ? (payload.accountCashFlows || [])
+        .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0)
+      : 0);
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
+  // The denominator is what the *account* was given, and when the quarantine makes
+  // the scope unsplittable the numerator is a subset of the instruments — dividing
+  // one by the other draws a curve of "return" on money most of which bought
+  // something the line does not count. The headline percentage and the XIRR are
+  // already withheld for that reason; this curve is the same claim with a shape.
+  const percentUsable = contributed > 0 && accountLevelBelongsHere;
   return {
     points,
-    percentPoints: contributed > 0
+    percentPoints: percentUsable
       ? points.map((point) => ({ time: point.time, value: share(point.value), delta: share(point.delta) }))
       : [],
-    percentAvailable: contributed > 0 && points.length >= 2,
-    percentBase: contributed > 0 ? contributed : null,
+    percentAvailable: percentUsable && points.length >= 2,
+    percentBase: percentUsable ? contributed : null,
     years: yearList.map(([year, value]) => ({ label: String(year), value })),
-    percentYears: contributed > 0
+    percentYears: percentUsable
       ? yearList.map(([year, value]) => ({ label: String(year), value: share(value) }))
       : [],
     dated,
-    undated,
     expected,
   };
 }
@@ -1701,8 +1771,14 @@ function percentLabel(value, { signed = false } = {}) {
 function updateTimelineNote() {
   const timeline = state.charts.get("timeline");
   const percent = state.timelineMode === "percent" && timeline?.percentAvailable;
+  // The percent mode used to replace the subtitle outright, taking the statement of
+  // what the line holds — and any complaint about undated money — with it. Switching
+  // the axis does not change either fact.
   byId("timelineNote").textContent = percent
-    ? `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`
+    ? [
+      `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`,
+      state.timelineCoverage || "",
+    ].filter(Boolean).join(" ")
     : [state.timelineCoverage || "", state.timelineBridge || ""].filter(Boolean).join(" ");
 }
 
@@ -1802,16 +1878,32 @@ function prepareCharts(payload) {
   state.charts.set("extremes", extremeRows(payload));
 
   const drift = timeline.expected - timeline.dated;
-  const covered = Math.abs(timeline.expected) > 1
-    ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
-    : true;
+  // Two thresholds, because either alone has a blind spot. The relative one alone
+  // cannot judge a scope whose own rows net out to nothing — and dropping the
+  // account-level flows from `expected` made that reachable, so a narrowed class
+  // summing to zero declared full coverage over eight thousand dollars of real
+  // drift. The absolute one alone would cry at rounding on an account this size.
+  // A dollar of undated money is worth naming whatever the scope totals.
+  const covered = Math.abs(drift) <= 1
+    || (Math.abs(timeline.expected) > 1
+      && Math.abs(drift) / Math.abs(timeline.expected) < 0.001);
+  // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
+  // which position earned it; the payment can land weeks later and in another year.
+  // Sales are dated individually, not at the close of the cycle they belong to. The
+  // account-level items are on the line too — except in the one case where the
+  // composition block drops them as well, and then the caption must not promise them.
+  const accountLevelOnLine = !scopeSummary(payload).undecomposable;
+  // The caveat states what the line holds, and that is true whether or not the
+  // self-check balanced — so it is a separate sentence rather than the alternative
+  // to the complaint. Printing only the complaint left the reader of a narrowed
+  // scope with no way to learn that interest, account fees and FX are missing from
+  // it, in exactly the case where the page had most to explain.
+  const contents = accountLevelOnLine
+    ? "Продажи, дивиденды по отсечке, сборы по инструментам, проценты брокера, сборы по счёту и FX-конверсии — по своим датам. Нереализованный P&L не входит."
+    : "Продажи, дивиденды по отсечке и сборы выбранных инструментов — по своим датам. Проценты брокера, сборы по счёту и FX-конверсии принадлежат счёту целиком и в этот срез не входят; нереализованный P&L не входит тоже.";
   state.timelineCoverage = covered
-    // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
-    // which position earned it; the payment can land weeks later and in another year.
-    // Sales are dated individually, not at the close of the cycle they belong to, and
-    // the account-level items are on the line too — everything except the unrealised.
-    ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
-    : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
+    ? contents
+    : `${contents} ${formatUsd(drift)} без даты в график не попали.`;
 
   /*
    * The line ends short of the headline on purpose: the unrealised has no date, the
@@ -1850,9 +1942,15 @@ function prepareCharts(payload) {
   // nothing to divide by would just produce an empty plot.
   const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
   percentButton.disabled = !timeline.percentAvailable;
+  // The denominator is the *dated* funding, and it can be missing three different
+  // ways: no funding at all, funding that nets to zero, and funding whose rows carry
+  // no timestamp. The old wording named only the first, so a page printing "Внесено
+  // минус выведено 808 290,14 $" two lines below claimed there were no deposits.
   percentButton.title = timeline.percentAvailable
     ? "Тот же результат в процентах от внесённых денег"
-    : "Недоступно: в снимке нет внесений (Deposits/Withdrawals)";
+    : scopeSummary(payload).undecomposable
+      ? "Недоступно: пока часть денег в карантине, доля счёта не делится по классам — знаменателем был бы весь счёт, а числителем только выбранные инструменты"
+      : "Недоступно: делить не на что — внесения с датами в снимке отсутствуют, гасят друг друга или в сумме отрицательны";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
@@ -1880,6 +1978,21 @@ function prepareCharts(payload) {
     }),
     { head: ["Составляющая", "Сумма, USD"] },
   );
+
+  // Says why the composition stops at the instruments. `buildupItems` drops the
+  // account-level rows in this case, and a block that simply ends early looks like
+  // data went missing rather than like a figure was declined.
+  const buildupScope = scopeSummary(payload);
+  // Tolerant of an absent node: a visitor can hold a cached index.html while the
+  // browser fetches a newer app.js, and a hard `byId(...).hidden` there threw inside
+  // the render, where the catch reported it as a wrong password.
+  const buildupNote = byId("buildupScopeNote");
+  if (buildupNote) {
+    buildupNote.hidden = !buildupScope.undecomposable;
+    buildupNote.textContent = buildupScope.undecomposable
+      ? "Пока часть инструментов вынесена за пределы итогов, счёт по классам не раскладывается: здесь только выбранные инструменты. Проценты брокера, сборы по счёту и валютные конверсии принадлежат счёту целиком и показаны, когда выбраны все классы."
+      : "";
+  }
 
   // Rendered alongside the other derived blocks: the quality table follows the
   // asset-class scope the way the composition block does, the income block by
@@ -2118,14 +2231,22 @@ function renderQuarantineNotice(payload) {
     notice.innerHTML = "";
     return;
   }
-  const count = instruments.length;
+  // One entry per row representation, not per instrument: an instrument traded both
+  // long and short has two rows and lands in the list twice, with one and the same
+  // `missing_fx_trades` behind both. That printed "2 инструмента … ALB, ALB" over a
+  // single conid. Five instruments on this account are two-directional. The amount is
+  // not re-summed from the list for the same reason — the pipeline publishes it.
+  const unique = new Map();
+  for (const item of instruments) {
+    const key = String(item?.conid ?? item?.symbol ?? "?");
+    if (!unique.has(key)) unique.set(key, String(item?.symbol || item?.conid || "?"));
+  }
+  const count = unique.size;
   const word = pluralRu(count, "инструмент", "инструмента", "инструментов");
-  const symbols = instruments
-    .map((item) => String(item?.symbol || item?.conid || "?"))
-    .join(", ");
+  const symbols = [...unique.values()].join(", ");
   notice.innerHTML = `
     <strong>${escapeHtml(`Вне итогов: ${count} ${word} на `)}${formatUsd(payload.quarantine?.fxResultUsdAtParRate)}</strong>
-    <span>${escapeHtml(`${symbols} — исполнения пришли без валютного курса, и USD-суммы по ним посчитаны по курсу 1:1. Строки остаются в таблице, но ни в одну сводку страницы не входят.`)}</span>
+    <span>${escapeHtml(`${symbols} — исполнения пришли без валютного курса, и USD-суммы по ним посчитаны по курсу 1:1. Эти суммы ни в одну сводку страницы не входят, строки остаются в таблице. Реальные деньги по этим сделкам лежат в кэше брокера, поэтому в общем результате счёта они есть.`)}</span>
   `;
 }
 
@@ -2965,6 +3086,7 @@ portfolioBody.addEventListener("keydown", (event) => {
 /* ----------------------------------------------------------------- issues --- */
 
 const ISSUE_TITLES = {
+  SETTLEMENT_DAY_UNKNOWN: "Выписку не удалось привязать ко дню",
   QUANTITY_MISMATCH: "Количество не совпадает с IBKR",
   AVCO_IBKR_BASIS_DIFFERENCE: "AVCO отличается от базиса IBKR",
   BASIS_NOT_COMPARABLE: "Базис сравнить не удалось",
@@ -2992,6 +3114,7 @@ const ISSUE_TITLES = {
 // The pipeline emits English messages; the page is Russian. Where a type has a known
 // explanation it wins, and the raw message stays as the fallback for anything new.
 const ISSUE_EXPLANATIONS = {
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, а итог по счёту не с чем сверить.",
   QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
   AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
   BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
@@ -3021,10 +3144,19 @@ const SEVERITY_RANK = { ERROR: 0, WARNING: 1, INFO: 2 };
 
 // `count` means positions for most issues and something else for the quarantine ones,
 // where it counts the executions or the cash events that could not be converted.
+// Used instead of ISSUE_EXPLANATIONS when the issue names instruments, so the
+// sentence can introduce the list that follows it.
+const ISSUE_EXPLANATIONS_WITH_SYMBOLS = {
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — и перечисленные контракты в стоимость счёта не входят:",
+};
+
 const ISSUE_COUNT_UNITS = {
   QUARANTINED_FX_EXECUTIONS: "исполн.",
   QUARANTINED_CASH: "событ.",
   UNCLASSIFIED_CASH_IN_RESULT: "событ.",
+  // Counts contracts, not positions — the default unit printed "3 позиц." on a page
+  // listing twenty-two of them.
+  SETTLEMENT_DAY_UNKNOWN: "контр.",
 };
 
 function issueNumbers(issue) {
@@ -3067,13 +3199,26 @@ function renderIssues(payload) {
     const severity = String(issue.severity || "WARNING").toUpperCase();
     const tone = SEVERITY_RANK[severity] === undefined ? "warning" : severity.toLowerCase();
     const title = ISSUE_TITLES[issue.type] || issue.type;
-    const explanation = ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
+    // A type can explain itself differently depending on what it carries. The
+    // settlement-day complaint has two costs — contracts left out of net asset
+    // value, or an identity nothing could check — and one static sentence claimed
+    // the second while listing the instruments of the first.
+    const explanation = (Array.isArray(issue.symbols) && issue.symbols.length
+      ? ISSUE_EXPLANATIONS_WITH_SYMBOLS[issue.type]
+      : null)
+      || ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
     const numbers = issueNumbers(issue);
+    // An issue can name the instruments it is about. The explanation says "the
+    // contracts listed", and until this was rendered there was no list — the field
+    // arrived from the pipeline and nothing read it.
+    const named = Array.isArray(issue.symbols) && issue.symbols.length
+      ? ` ${issue.symbols.join(", ")}.`
+      : "";
     return `
       <div class="issue-item ${escapeHtml(tone)}">
         <span class="severity">${escapeHtml(severity)}</span>
         <span class="issue-type">${escapeHtml(issue.symbol ? `${issue.symbol} · ${title}` : title)}</span>
-        <span class="issue-message">${numbers ? `${escapeHtml(numbers)} — ` : ""}${escapeHtml(explanation)}</span>
+        <span class="issue-message">${numbers ? `${escapeHtml(numbers)} — ` : ""}${escapeHtml(explanation + named)}</span>
       </div>
     `;
   }).join("");
@@ -3126,6 +3271,9 @@ const CLEARED_ON_LOCK = [
   "heroPanel", "buildupChart", "buildupTable", "timelineChart", "yearChart",
   "classStrip", "allocationChart", "extremesChart", "qualityStats", "incomeStats",
   "timelineNote", "allocationNote", "kpiContext", "resultCount", "quarantineNotice",
+  // On its own it says that something is in quarantine and that a class is selected —
+  // two facts about the portfolio, which is exactly what locking removes.
+  "buildupScopeNote",
 ];
 
 /**
@@ -3170,7 +3318,12 @@ function lockDashboard(message = "") {
   scopeLabelNode.closest("summary").classList.remove("is-narrowed");
   byId("assetScopeAll").hidden = true;
   byId("assetScope").open = false;
-  for (const id of CLEARED_ON_LOCK) byId(id).innerHTML = "";
+  // Skips an id the document does not have: locking must clear what is there, not
+  // throw part-way through and leave the rest of the plaintext on the page.
+  for (const id of CLEARED_ON_LOCK) {
+    const node = byId(id);
+    if (node) node.innerHTML = "";
+  }
   for (const id of ["accountPanel", "issuesPanel", "totalsCheck", "buildupPanel",
     "timelinePanel", "allocationPanel", "extremesPanel", "qualityPanel", "incomePanel",
     "quarantineNotice"]) {
