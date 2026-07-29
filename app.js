@@ -61,7 +61,44 @@ const state = {
   // Which asset classes the whole page is about. Empty means every class; the
   // selection is restored from localStorage on load.
   assetScope: new Set(),
+  // Conids the pipeline refused to put in its own totals. Rebuilt from every payload.
+  quarantined: new Set(),
 };
+
+/* ------------------------------------------------------------- quarantine --- */
+
+/*
+ * An instrument whose executions arrived without an FX rate is converted by the
+ * pipeline at a par rate of 1:1 — a rate nobody published. The row survives with all
+ * the figures that rate implies, because the money is real and hiding it would be a
+ * lie; what the pipeline does instead is leave the instrument out of `payload.totals`
+ * and say so in `payload.quarantine`.
+ *
+ * The page has to draw the same line. Summing every row against totals that exclude
+ * one of them makes the two disagree by the whole quarantined amount, and the "totals
+ * equal the sum of the rows" check then reports the pipeline as broken when the only
+ * thing broken is the page's arithmetic. A snapshot published before this block
+ * existed simply quarantines nothing.
+ */
+function quarantinedConids(payload) {
+  return new Set((payload?.quarantine?.fxInstruments || [])
+    .map((item) => String(item?.conid ?? ""))
+    .filter(Boolean));
+}
+
+function isQuarantined(row) {
+  return state.quarantined.size > 0 && state.quarantined.has(String(row?.conid ?? ""));
+}
+
+/**
+ * Every row the page is allowed to add up — the one place the quarantine is applied.
+ * The table draws from `payload.rows` directly and keeps showing the excluded rows,
+ * flagged; everything that produces a summary figure goes through this instead.
+ */
+function trustedRows(payload = state.payload) {
+  const rows = payload?.rows || [];
+  return state.quarantined.size ? rows.filter((row) => !isQuarantined(row)) : rows;
+}
 
 /* ------------------------------------------------------------------ scope --- */
 
@@ -129,7 +166,7 @@ function inScope(row) {
 }
 
 function scopedRows() {
-  return (state.payload?.rows || []).filter(inScope);
+  return trustedRows().filter(inScope);
 }
 
 function scopeLabel() {
@@ -239,7 +276,11 @@ let scopeCache = null;
 function scopeSummary(payload) {
   const key = `${payload.generatedAt}|${[...state.assetScope].sort().join(",")}`;
   if (scopeCache && scopeCache.key === key) return scopeCache.value;
-  const all = payload.rows || [];
+  // Quarantined instruments are in neither half of the split: they are not part of the
+  // kept rows, and they must not be carved out as "excluded" either — their cash flows
+  // are the same 1:1 fiction as their totals, and feeding them to the money-weighted
+  // return would corrupt a rate the page prints to a basis point.
+  const all = trustedRows(payload);
   const rows = all.filter(inScope);
   const excluded = all.filter((row) => !inScope(row));
   const sum = (field) => rows.reduce((total, row) => total + (numberValue(row[field]) || 0), 0);
@@ -806,11 +847,17 @@ function isFiltered(rows) {
   // A year can leave the row count untouched while changing every figure in them, so
   // the count alone cannot decide whether these totals are comparable to the payload's.
   if (byId("yearFilter").value) return true;
-  return rows.length !== (state.payload?.rows?.length || 0);
+  // Against the trusted rows, because that is what was summed: the published totals
+  // leave the quarantined instruments out, so an unfiltered page is one whose sum
+  // covers every row the pipeline itself counted.
+  return rows.length !== trustedRows().length;
 }
 
 function renderKpis(payload, rows) {
-  const { totals, partial } = aggregateRows(rows);
+  // The cards follow the filter, but never the quarantine: a row converted at a par
+  // rate of 1:1 is displayed and not added up, here as in `payload.totals`.
+  const counted = state.quarantined.size ? rows.filter((row) => !isQuarantined(row)) : rows;
+  const { totals, partial } = aggregateRows(counted);
   // Under a year the three position cards have nothing to add up: the rows carry no
   // market value, basis or unrealised, because those describe today and belong to no
   // year. Zero would read as "worth nothing" rather than "does not apply".
@@ -833,7 +880,7 @@ function renderKpis(payload, rows) {
       ${(note || partial) ? `<small>${escapeHtml(note)}${partial ? `${note ? " · " : ""}не хватает цен или курсов` : ""}</small>` : ""}
     </article>
   `).join("");
-  renderTotalsCheck(payload, rows, totals);
+  renderTotalsCheck(payload, counted, totals);
 }
 
 /**
@@ -898,6 +945,10 @@ function renderHero(payload) {
   const performance = payload.performance || {};
   const allocation = payload.allocation || {};
   const status = payload.status || {};
+  // Every row, quarantined ones included: this is used only for the "N open · M closed"
+  // count, which describes the instruments the table lists. Counting trusted rows here
+  // while `status.openPositionCount` counts all of them would subtract a quarantined
+  // open position from the closed histories and leave the pair short of the table.
   const rows = payload.rows || [];
 
   const scope = scopeSummary(payload);
@@ -1115,6 +1166,23 @@ function buildupItems(payload) {
 }
 
 /**
+ * When a cash event happened, for every block that groups cash events by period.
+ *
+ * The ex-date, not the payment date: a dividend was earned by the position that held
+ * the shares on the day the register closed, and the cash can land weeks later and in
+ * the next calendar year. Withholding tax inherits the ex-date of its dividend, or a
+ * payment and its own tax could be filed under different years.
+ *
+ * This is the one rule, in one place, deliberately. The cumulative chart and the
+ * income block dated dividends this way while the year filter dated them by payment,
+ * so the same page reported two different dividend totals for the same year — 1 742,96
+ * apart for 2025 alone. Fees carry no ex-date and are unaffected.
+ */
+function cashEventDate(event) {
+  return event.exDate || event.timestamp;
+}
+
+/**
  * Realised money on the date it was actually realised: a closed cycle's P&L at the
  * moment it closed, a dividend on the day it was earned. Unrealised P&L is
  * deliberately absent — it has no date, and pinning it to today would draw a jump
@@ -1159,7 +1227,7 @@ function realisedTimeline(payload) {
       }
       for (const event of cycle.cashEvents || []) {
         if (!["DIVIDEND", "WITHHOLDING_TAX", "FEE"].includes(String(event.category || ""))) continue;
-        add(timeValue(event.exDate || event.timestamp), numberValue(event.amountUsd) || 0);
+        add(timeValue(cashEventDate(event)), numberValue(event.amountUsd) || 0);
       }
     }
   }
@@ -1259,7 +1327,7 @@ const ASSET_CLASS_LABELS = {
 const ASSET_CLASS_SLOTS = { CASH: 1, STK: 2, OPT: 3, FUT: 4, BOND: 5, FUND: 6, FOP: 7, WAR: 8, CFD: 8 };
 
 function allocationModel(payload) {
-  const open = (payload.rows || []).filter((row) => isOpen(row)
+  const open = trustedRows(payload).filter((row) => isOpen(row)
     && numberValue(row.marketValueUsd) !== null);
   const exposure = open.reduce((sum, row) => sum + Math.abs(numberValue(row.marketValueUsd)), 0);
   const cash = numberValue(payload.allocation?.cashUsd);
@@ -1489,7 +1557,7 @@ function renderIncomePanel(payload) {
   const dividendYears = new Map();
   const payers = new Map();
   let dividendTotal = 0;
-  for (const row of payload.rows || []) {
+  for (const row of trustedRows(payload)) {
     const net = numberValue(row.dividendsNetUsd) || 0;
     if (net) {
       const symbol = String(row.symbol || row.conid);
@@ -1498,7 +1566,7 @@ function renderIncomePanel(payload) {
     for (const cycle of row.cycles || []) {
       for (const event of cycle.cashEvents || []) {
         if (!["DIVIDEND", "WITHHOLDING_TAX"].includes(String(event.category || ""))) continue;
-        const year = String(event.exDate || event.timestamp || "").slice(0, 4);
+        const year = String(cashEventDate(event) || "").slice(0, 4);
         if (!year) continue;
         const amount = numberValue(event.amountUsd) || 0;
         dividendYears.set(year, (dividendYears.get(year) || 0) + amount);
@@ -2000,6 +2068,46 @@ function renderAccountPanel(payload) {
   `;
 }
 
+/* ------------------------------------------------------------- quarantine --- */
+
+/** Russian counts three ways, and "1 инструментов" reads as a bug in the page. */
+function pluralRu(count, one, few, many) {
+  const hundreds = Math.abs(Math.trunc(count)) % 100;
+  const tens = hundreds % 10;
+  if (hundreds >= 11 && hundreds <= 14) return many;
+  if (tens === 1) return one;
+  if (tens >= 2 && tens <= 4) return few;
+  return many;
+}
+
+/**
+ * One line saying how much money the page is deliberately not counting.
+ *
+ * The problems panel already carries the pipeline's own WARNING about it, so this is
+ * not a second alarm: it is the amount. Without it the difference between the headline
+ * and the sum of the table is unexplained, and the honest answer — "these rows exist,
+ * they are shown, they are excluded, and here is by how much" — is unavailable
+ * anywhere on the page.
+ */
+function renderQuarantineNotice(payload) {
+  const notice = byId("quarantineNotice");
+  const instruments = payload.quarantine?.fxInstruments || [];
+  notice.hidden = instruments.length === 0;
+  if (!instruments.length) {
+    notice.innerHTML = "";
+    return;
+  }
+  const count = instruments.length;
+  const word = pluralRu(count, "инструмент", "инструмента", "инструментов");
+  const symbols = instruments
+    .map((item) => String(item?.symbol || item?.conid || "?"))
+    .join(", ");
+  notice.innerHTML = `
+    <strong>${escapeHtml(`Вне итогов: ${count} ${word} на `)}${formatUsd(payload.quarantine?.fxResultUsdAtParRate)}</strong>
+    <span>${escapeHtml(`${symbols} — исполнения пришли без валютного курса, и USD-суммы по ним посчитаны по курсу 1:1. Строки остаются в таблице, но ни в одну сводку страницы не входят.`)}</span>
+  `;
+}
+
 /* ----------------------------------------------------------------- status --- */
 
 // Two clocks, because they fail independently. The pipeline can be dead while the
@@ -2095,7 +2203,9 @@ function renderFilterOptions(rows) {
   for (const row of rows) {
     for (const cycle of row.cycles || []) {
       for (const trade of cycle.trades || []) years.add(String(trade.timestamp || "").slice(0, 4));
-      for (const event of cycle.cashEvents || []) years.add(String(event.timestamp || "").slice(0, 4));
+      // The same date `projectRowToYear` files the event under, or the list could
+      // offer a year with nothing in it and withhold one that has something.
+      for (const event of cycle.cashEvents || []) years.add(String(cashEventDate(event) || "").slice(0, 4));
     }
   }
   years.delete("");
@@ -2298,7 +2408,10 @@ function projectRowToYear(row, year) {
 
   for (const cycle of row.cycles || []) {
     const trades = (cycle.trades || []).filter((trade) => inYear(trade.timestamp));
-    const cash = (cycle.cashEvents || []).filter((event) => inYear(event.timestamp));
+    // Dividends by ex-date, the same rule the cumulative chart and the income block
+    // read: filed by the payment date instead, this block disagreed with both of them
+    // about how much the same year paid.
+    const cash = (cycle.cashEvents || []).filter((event) => inYear(cashEventDate(event)));
     if (!trades.length && !cash.length) continue;
     cycles.push(cycle);
     const multiplier = numberValue(cycle.multiplier) || 1;
@@ -2324,7 +2437,9 @@ function projectRowToYear(row, year) {
       }
     }
     for (const event of cash) {
-      seen(event.timestamp);
+      // The date it was filed under, so the row's own from–to line cannot fall outside
+      // the year the row was projected into.
+      seen(cashEventDate(event));
       const amount = numberValue(event.amountUsd) || 0;
       if (event.category === "DIVIDEND") gross += amount;
       else if (event.category === "WITHHOLDING_TAX") withheld += amount;
@@ -2391,7 +2506,7 @@ function filteredRows() {
   for (const source of state.payload?.rows || []) {
     if (state.activeTab === "open" && !isOpen(source)) continue;
     if (state.activeTab === "closed" && isOpen(source)) continue;
-    if (state.activeTab === "review" && source.status !== "REVIEW") continue;
+    if (state.activeTab === "review" && source.status !== "REVIEW" && !isQuarantined(source)) continue;
     if (!inScope(source)) continue;
     if (direction && source.direction !== direction) continue;
     if (currency && source.currency !== currency) continue;
@@ -2412,14 +2527,26 @@ function filteredRows() {
 
 /* ------------------------------------------------------------------ table --- */
 
+// A quarantined row is a row whose money the page will not vouch for, which is what
+// the review pill says. The pipeline marks it too; asserting it here as well means the
+// label cannot drift apart from the arithmetic that produced the quarantine.
 function statusLabel(row) {
-  if (row.status === "REVIEW") return "Проверить";
+  if (row.status === "REVIEW" || isQuarantined(row)) return "Проверить";
   return isOpenNow(row) ? "Открыта" : "Закрыта";
 }
 
 function statusClass(row) {
-  if (row.status === "REVIEW") return "review";
+  if (row.status === "REVIEW" || isQuarantined(row)) return "review";
   return isOpenNow(row) ? "open" : "closed";
+}
+
+/** The line under the status pill: what the position is, and whether it counts. */
+function rowNote(row) {
+  return [
+    row.direction,
+    row.assetClass,
+    isQuarantined(row) ? "вне итогов: курс 1:1" : "",
+  ].filter(Boolean).join(" · ");
 }
 
 const BREAK_EVEN_REASONS = {
@@ -2675,7 +2802,7 @@ function rowHtml(row, scale) {
       tabindex="0" role="button" aria-expanded="${expanded}">
       <td><div class="instrument-cell"><span class="instrument-text"><strong class="instrument-name" title="${escapeHtml(row.instrument)}">${escapeHtml(row.symbol)}</strong><small class="instrument-meta">${escapeHtml(row.instrument)}</small></span><span class="expand-chevron" aria-hidden="true">›</span></div></td>
       <td><span class="currency-tag">${escapeHtml(row.currency)}</span></td>
-      <td class="status-cell"><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(row.direction)} · ${escapeHtml(row.assetClass)}</span></td>
+      <td class="status-cell"><span class="status-pill ${statusClass(row)}">${statusLabel(row)}</span><span class="row-note">${escapeHtml(rowNote(row))}</span></td>
       <td class="cycle-cell"><span class="cycle-line">${cycleFrom}</span><span class="cycle-line">${cycleTo}</span></td>
       <td class="numeric quantity-cell">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
@@ -2836,6 +2963,9 @@ const ISSUE_TITLES = {
   ACCOUNT_IDENTITY_MISMATCH: "Итог не сходится со счётом",
   UNMATCHED_CASH_EVENT: "Кэш не привязан к инструменту",
   CORPORATE_BASIS_UNALLOCATED: "Себестоимость по КД никуда не перешла",
+  QUARANTINED_FX_EXECUTIONS: "Исполнения без валютного курса",
+  QUARANTINED_CASH: "Кэш без пересчёта в доллары",
+  UNCLASSIFIED_CASH_IN_RESULT: "Неклассифицированный кэш внутри итога",
 };
 
 // The pipeline emits English messages; the page is Russian. Where a type has a known
@@ -2859,9 +2989,22 @@ const ISSUE_EXPLANATIONS = {
   ACCOUNT_IDENTITY_MISMATCH: "Стоимость активов плюс кэш минус внесённое не равно сумме компонентов результата.",
   UNMATCHED_CASH_EVENT: "Дивиденд или налог не удалось привязать ни к одному инструменту.",
   CORPORATE_BASIS_UNALLOCATED: "Себестоимость, освободившаяся при корпоративном действии, никуда не перешла.",
+  // The pipeline announces the quarantine here; the plate under the header states the
+  // amount. Both are wanted: the panel says a rule fired, the plate says how much money.
+  QUARANTINED_FX_EXECUTIONS: "У части исполнений нет опубликованного курса валюты, поэтому долларовые суммы по этим инструментам посчитаны по курсу 1:1 и вынесены за пределы итогов.",
+  QUARANTINED_CASH: "Кэш-события без долларовой оценки: в долларовые итоги они не входят, суммы известны только в своей валюте.",
+  UNCLASSIFIED_CASH_IN_RESULT: "Кэш, который не удалось отнести ни к одной категории. Он входит в итог отдельной строкой, пока не будет классифицирован.",
 };
 
 const SEVERITY_RANK = { ERROR: 0, WARNING: 1, INFO: 2 };
+
+// `count` means positions for most issues and something else for the quarantine ones,
+// where it counts the executions or the cash events that could not be converted.
+const ISSUE_COUNT_UNITS = {
+  QUARANTINED_FX_EXECUTIONS: "исполн.",
+  QUARANTINED_CASH: "событ.",
+  UNCLASSIFIED_CASH_IN_RESULT: "событ.",
+};
 
 function issueNumbers(issue) {
   const parts = [];
@@ -2875,7 +3018,7 @@ function issueNumbers(issue) {
   if (issue.basisDifferenceUsd != null) {
     parts.push(`на ${formatUsd(issue.basisDifferenceUsd)}`);
   }
-  if (issue.count != null) parts.push(`${issue.count} позиц.`);
+  if (issue.count != null) parts.push(`${issue.count} ${ISSUE_COUNT_UNITS[issue.type] || "позиц."}`);
   if (issue.ageHours != null) parts.push(`возраст ${formatNumber(issue.ageHours, 1)} ч`);
   return parts.join(" · ");
 }
@@ -2919,6 +3062,8 @@ function renderIssues(payload) {
 
 function renderDashboard(payload) {
   state.payload = payload;
+  // Before anything reads a row: every summary in the page is filtered through this.
+  state.quarantined = quarantinedConids(payload);
   scopeCache = null;
   state.assetScope = storedScope();
   // Before the first block reads it: the hero is drawn ahead of the filter control.
@@ -2929,6 +3074,7 @@ function renderDashboard(payload) {
     byId("schemaWarning").textContent =
       `Формат данных версии ${payload.schemaVersion} новее этой страницы — часть значений может не отображаться.`;
   }
+  renderQuarantineNotice(payload);
   renderStatus(payload);
   renderHero(payload);
   renderAccountPanel(payload);
@@ -2958,7 +3104,7 @@ const CLEARED_ON_LOCK = [
   "kpiGrid", "issuesList", "accountIdentity", "dataStatus", "totalsCheck",
   "heroPanel", "buildupChart", "buildupTable", "timelineChart", "yearChart",
   "classStrip", "allocationChart", "extremesChart", "qualityStats", "incomeStats",
-  "timelineNote", "allocationNote", "kpiContext", "resultCount",
+  "timelineNote", "allocationNote", "kpiContext", "resultCount", "quarantineNotice",
 ];
 
 /**
@@ -2971,6 +3117,7 @@ const CLEARED_ON_LOCK = [
 function lockDashboard(message = "") {
   state.payload = null;
   state.cryptoKey = null;
+  state.quarantined = new Set();
   // A debounced search or a lingering refresh label firing after the lock would
   // call render paths against a null payload — a TypeError in a timer at best.
   if (state.searchTimer) {
@@ -3004,9 +3151,17 @@ function lockDashboard(message = "") {
   byId("assetScope").open = false;
   for (const id of CLEARED_ON_LOCK) byId(id).innerHTML = "";
   for (const id of ["accountPanel", "issuesPanel", "totalsCheck", "buildupPanel",
-    "timelinePanel", "allocationPanel", "extremesPanel", "qualityPanel", "incomePanel"]) {
+    "timelinePanel", "allocationPanel", "extremesPanel", "qualityPanel", "incomePanel",
+    "quarantineNotice"]) {
     byId(id).hidden = true;
   }
+  // Hiding the tooltip leaves whatever it last said in the DOM: hover one bar of the
+  // cumulative chart, lock, and the symbol and the amount are still there to be read
+  // out of the markup. The refresh line is the same — "Обновлено: <date>" is a fact
+  // about the portfolio, and the label beside it has to go back to its resting text.
+  tooltip.innerHTML = "";
+  byId("refreshFeedback").textContent = "";
+  byId("refreshButtonLabel").textContent = "Обновить";
   tooltip.hidden = true;
   dashboardView.hidden = true;
   unlockView.hidden = false;

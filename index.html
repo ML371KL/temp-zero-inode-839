@@ -84,6 +84,8 @@
       <section id="dashboardView" hidden>
         <div id="dataStatus" class="data-status"></div>
         <div id="schemaWarning" class="schema-warning" role="status" hidden></div>
+        <!-- Инструменты, вынесенные бэкендом за пределы итогов: курс 1:1 -->
+        <div id="quarantineNotice" class="schema-warning quarantine-notice" role="status" hidden></div>
 
         <!-- Итог счёта: одна главная цифра и из чего она состоит -->
         <section id="heroPanel" class="hero-panel" data-collapse="hero" aria-label="Итог счёта"></section>
@@ -225,7 +227,7 @@
               <select id="profitFilter" aria-label="Результат">
                 <option value="">Любой итог</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
               </select>
-              <select id="yearFilter" aria-label="Год" title="Показывает, что инструмент сделал за один календарный год: реализованное, дивиденды и итог считаются только по событиям этого года">
+              <select id="yearFilter" aria-label="Год" title="Показывает, что инструмент сделал за один календарный год: реализованное, дивиденды и итог считаются только по событиям этого года. Дивиденды и налог с них отнесены к году по дате отсечки, а не по дате выплаты — так же, как в блоках «Дивиденды и проценты» и «Результат нарастающим итогом»">
                 <option value="">Любой год</option>
               </select>
               <button id="resetFilters" class="ghost-button" type="button" disabled>Сбросить</button>
