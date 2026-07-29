@@ -1950,7 +1950,7 @@ function prepareCharts(payload) {
     ? "Тот же результат в процентах от внесённых денег"
     : scopeSummary(payload).undecomposable
       ? "Недоступно: пока часть денег в карантине, доля счёта не делится по классам — знаменателем был бы весь счёт, а числителем только выбранные инструменты"
-      : "Недоступно: делить не на что — внесения с датами в сумме дают ноль или их нет в снимке";
+      : "Недоступно: делить не на что — внесения с датами в снимке отсутствуют, гасят друг друга или в сумме отрицательны";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
@@ -3144,6 +3144,12 @@ const SEVERITY_RANK = { ERROR: 0, WARNING: 1, INFO: 2 };
 
 // `count` means positions for most issues and something else for the quarantine ones,
 // where it counts the executions or the cash events that could not be converted.
+// Used instead of ISSUE_EXPLANATIONS when the issue names instruments, so the
+// sentence can introduce the list that follows it.
+const ISSUE_EXPLANATIONS_WITH_SYMBOLS = {
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — и перечисленные контракты в стоимость счёта не входят:",
+};
+
 const ISSUE_COUNT_UNITS = {
   QUARANTINED_FX_EXECUTIONS: "исполн.",
   QUARANTINED_CASH: "событ.",
@@ -3193,7 +3199,14 @@ function renderIssues(payload) {
     const severity = String(issue.severity || "WARNING").toUpperCase();
     const tone = SEVERITY_RANK[severity] === undefined ? "warning" : severity.toLowerCase();
     const title = ISSUE_TITLES[issue.type] || issue.type;
-    const explanation = ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
+    // A type can explain itself differently depending on what it carries. The
+    // settlement-day complaint has two costs — contracts left out of net asset
+    // value, or an identity nothing could check — and one static sentence claimed
+    // the second while listing the instruments of the first.
+    const explanation = (Array.isArray(issue.symbols) && issue.symbols.length
+      ? ISSUE_EXPLANATIONS_WITH_SYMBOLS[issue.type]
+      : null)
+      || ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
     const numbers = issueNumbers(issue);
     // An issue can name the instruments it is about. The explanation says "the
     // contracts listed", and until this was rendered there was no list — the field
