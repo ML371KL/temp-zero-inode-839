@@ -3095,6 +3095,8 @@ const ISSUE_TITLES = {
   RECONCILIATION_INCOMPLETE: "Сверка себестоимости не выполнена",
   POSITION_BASIS_CHECK_DEFERRED: "Сверка себестоимости выполнена частично",
   RECONCILIATION_STALE: "Вердикт сверки устарел",
+  RECONCILIATION_DATE_INVALID: "Дату последней сверки прочитать не удалось",
+  RECONCILIATION_DATE_IN_FUTURE: "Вердикт сверки датирован будущим",
   RECONCILIATION_MISSING: "Сверка ни разу не выполнялась",
   CURRENCY_MISMATCH: "Валюта позиции у брокера не совпадает",
   ASSET_CLASS_MISMATCH: "Класс актива у брокера не совпадает",
@@ -3125,6 +3127,8 @@ const ISSUE_EXPLANATIONS = {
   RECONCILIATION_INCOMPLETE: "IBKR отключил расчёт себестоимости в этом отчёте, поэтому сверка не выполнена ни по одной позиции.",
   POSITION_BASIS_CHECK_DEFERRED: "По части позиций IBKR не отдал себестоимость, сверка выполнена не полностью.",
   RECONCILIATION_STALE: "Последняя сверка с IBKR слишком старая, чтобы описывать текущие цифры.",
+  RECONCILIATION_DATE_INVALID: "У последней сверки с IBKR нечитаемая отметка времени, поэтому проверить, описывает ли она сегодняшние цифры, невозможно. Считайте сверку невыполненной, пока не пройдёт следующая.",
+  RECONCILIATION_DATE_IN_FUTURE: "Последняя сверка с IBKR датирована будущим — обычно это сбитые часы на машине, которая её записала. Пока это так, возраст вердикта ничего не означает, и свежим он считаться не может.",
   RECONCILIATION_MISSING: "Сверка с IBKR ни разу не выполнялась.",
   CURRENCY_MISMATCH: "Валюта позиции у брокера отличается от локальной — все конверсии по этой бумаге под вопросом.",
   ASSET_CLASS_MISMATCH: "IBKR относит инструмент к другому классу активов.",
@@ -3179,6 +3183,7 @@ function issueNumbers(issue) {
   }
   if (issue.count != null) parts.push(`${issue.count} ${ISSUE_COUNT_UNITS[issue.type] || "позиц."}`);
   if (issue.ageHours != null) parts.push(`возраст ${formatNumber(issue.ageHours, 1)} ч`);
+  if (issue.aheadHours != null) parts.push(`вперёд на ${formatNumber(issue.aheadHours, 1)} ч`);
   return parts.join(" · ");
 }
 

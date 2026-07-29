@@ -412,6 +412,79 @@ async function selectClasses(page, classes) {
   await sleep(SETTLE_MS);
 }
 
+/**
+ * The scope filter is not only a function, it is a control someone has to reach.
+ *
+ * `selectClasses` above sets `checked` and dispatches the event, which proves the
+ * filtering logic and nothing about whether a person can operate it. A one-line CSS
+ * change made the row a scrollport at every width, and the menu — absolutely
+ * positioned inside it — was clipped away on every desktop: open, invisible,
+ * unclickable, and every existing check still green. So this one uses the mouse.
+ */
+async function checkScopeReachable(ctx) {
+  const session = await openPage(ctx.browser);
+  const failures = [];
+  try {
+    await goto(session.page, ctx.site.origin);
+    await unlock(session.page, ctx.password);
+    for (const width of [1920, 1440, 1280, 1024, 900, 830, 800, 761, 760, 420]) {
+      await session.page.setViewport({ width, height: 900 });
+      await sleep(SETTLE_MS);
+      const opened = await session.page.evaluate(() => {
+        const details = document.getElementById("assetScope")
+          || document.querySelector(".scope-filter");
+        if (!details) return { ok: false, why: "нет элемента среза" };
+        details.open = true;
+        return { ok: true };
+      });
+      if (!opened.ok) { failures.push(`${width}px: ${opened.why}`); continue; }
+      await sleep(SETTLE_MS);
+      // The page may be scrolled to bring the menu into view — a reader would do that
+      // — but the *row* may not. `scrollIntoView` would scroll whichever box clips the
+      // checkbox, which on a broken layout is the filter row itself: the first version
+      // of this check did exactly that, reached into the 36px slit one option at a
+      // time, and passed on the regression it was written to catch.
+      const before = await session.page.evaluate(() => {
+        const box = document.querySelector("#assetScopeOptions input[type=checkbox]");
+        if (!box) return null;
+        const rect = box.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          window.scrollBy(0, rect.top - window.innerHeight / 2);
+        }
+        const after = box.getBoundingClientRect();
+        return {
+          checked: box.checked,
+          x: after.left + after.width / 2,
+          y: after.top + after.height / 2,
+          onScreen: after.top >= 0 && after.bottom <= window.innerHeight
+            && after.left >= 0 && after.right <= window.innerWidth,
+        };
+      });
+      if (!before) { failures.push(`${width}px: нет чекбокса среза`); continue; }
+      if (!before.onScreen) {
+        failures.push(`${width}px: чекбокс среза не выводится на экран даже прокруткой страницы`);
+        continue;
+      }
+      await session.page.mouse.click(before.x, before.y);
+      await sleep(SETTLE_MS);
+      const flipped = await session.page.evaluate((was) => {
+        const box = document.querySelector("#assetScopeOptions input[type=checkbox]");
+        return box ? box.checked !== was : false;
+      }, before.checked);
+      if (!flipped) {
+        failures.push(`${width}px: клик по чекбоксу среза ничего не изменил`);
+      }
+    }
+  } finally {
+    await session.close();
+  }
+  ctx.report.record(
+    "the asset-class menu can actually be clicked at every width",
+    failures,
+    failures.length ? "" : "10 widths",
+  );
+}
+
 async function checkScopeConsistency(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -936,6 +1009,7 @@ async function main() {
     await detectEnvironmentNoise(browser, site.origin, report);
     await checkLockLeavesNothing(ctx);
     await checkScopeConsistency(ctx);
+    await checkScopeReachable(ctx);
     await checkSchemaAndFailures(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);

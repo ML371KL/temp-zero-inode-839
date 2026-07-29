@@ -688,14 +688,15 @@ button { color: inherit; }
 .quick-tabs button { min-height: 28px; border: 0; border-radius: 7px; padding: 4px 14px; color: var(--ink-2); background: transparent; font-size: 13px; cursor: pointer; }
 .quick-tabs button:hover { color: var(--ink); }
 .quick-tabs button.active { color: var(--ink); background: var(--surface); box-shadow: var(--shadow-soft); }
-/* `min-width: 0` and its own scrollport at every width, not only under 760px: between
-   761 and about 830 the row is still laid out as a desktop row but no longer fits, and
-   it clipped 34px off the edge of the last control — the browser checks had to forgive
-   48px of hidden content to stay green, which is a blind spot the size of a button. */
-.select-filters {
-  display: flex; gap: 7px; align-items: center;
-  min-width: 0; overflow-x: auto; scrollbar-width: thin;
-}
+/* `min-width: 0` lets the row shrink instead of pushing its neighbours; the scrollport
+   that goes with it lives one breakpoint up, not here. Putting `overflow-x: auto` at
+   this level fixed the 34px the row clipped at 768px and broke something far larger:
+   `overflow-x: auto` computes `overflow-y` to `auto` as well, so the row became a 36px
+   scrollport in both directions, and the asset-class menu — absolutely positioned
+   inside it — was clipped away on every desktop width. The scrollport and the rule
+   that makes it safe (`.scope-menu { position: static }`) have to live on the same
+   breakpoint, or the row eats the menu wherever only one of them applies. */
+.select-filters { display: flex; gap: 7px; align-items: center; min-width: 0; }
 select, .scope-filter > summary {
   min-height: 32px; border: 1px solid var(--line); border-radius: 8px; outline: 0;
   padding: 4px 24px 4px 9px; color: var(--ink-2); background: var(--surface-raised);
@@ -1053,11 +1054,17 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .scope-option input { margin: 0; }
 .scope-filter .ghost-button { width: 100%; }
 
-@media (max-width: 760px) {
-  /* The row scrolls sideways on a phone, and an absolutely positioned menu inside a
-     scroll container is clipped by it. Here the menu opens in the flow instead. */
+@media (max-width: 830px) {
+  /* Below 830 the filter row no longer fits its panel as a desktop row: at 800 it
+     overflowed by 22px and at 761 by 61, clipping the edge of the last control. It
+     gets a scrollport here — and the menu has to leave `position: absolute` in the
+     same breath, because an absolutely positioned box inside a scroll container is
+     clipped by it. These two rules are one decision and must never be separated
+     again: with the scrollport alone the menu is invisible and unclickable. */
+  .select-filters { overflow-x: auto; scrollbar-width: thin; }
   .scope-menu { position: static; min-width: 0; margin-top: 6px; box-shadow: none; }
   /* The row is a horizontal scroller here, so nothing shifts and the label can size
-     itself instead of holding a desktop-width slot. */
+     itself instead of holding a desktop-width slot. Dropping the fixed slot is also
+     what removes the overflow at 800-830 outright. */
   .scope-filter > summary { width: auto; max-width: 188px; }
 }
