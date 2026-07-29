@@ -1260,14 +1260,14 @@ function cashEventDate(event) {
 function realisedTimeline(payload) {
   const buckets = new Map();
   let dated = 0;
-  let undated = 0;
 
   const add = (time, amount) => {
     if (!amount) return;
-    if (time === null) {
-      undated += amount;
-      return;
-    }
+    // Undated money is not accumulated here on purpose. It used to be, and the
+    // figure was never read: the self-check derives the same quantity as
+    // `expected - dated`, which also catches money the line never saw at all —
+    // a source `add` was not called for cannot be counted by `add`.
+    if (time === null) return;
     const date = new Date(time);
     const key = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
     buckets.set(key, (buckets.get(key) || 0) + amount);
@@ -1379,19 +1379,24 @@ function realisedTimeline(payload) {
         .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0)
       : 0);
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
+  // The denominator is what the *account* was given, and when the quarantine makes
+  // the scope unsplittable the numerator is a subset of the instruments — dividing
+  // one by the other draws a curve of "return" on money most of which bought
+  // something the line does not count. The headline percentage and the XIRR are
+  // already withheld for that reason; this curve is the same claim with a shape.
+  const percentUsable = contributed > 0 && accountLevelBelongsHere;
   return {
     points,
-    percentPoints: contributed > 0
+    percentPoints: percentUsable
       ? points.map((point) => ({ time: point.time, value: share(point.value), delta: share(point.delta) }))
       : [],
-    percentAvailable: contributed > 0 && points.length >= 2,
-    percentBase: contributed > 0 ? contributed : null,
+    percentAvailable: percentUsable && points.length >= 2,
+    percentBase: percentUsable ? contributed : null,
     years: yearList.map(([year, value]) => ({ label: String(year), value })),
-    percentYears: contributed > 0
+    percentYears: percentUsable
       ? yearList.map(([year, value]) => ({ label: String(year), value: share(value) }))
       : [],
     dated,
-    undated,
     expected,
   };
 }
@@ -1766,8 +1771,14 @@ function percentLabel(value, { signed = false } = {}) {
 function updateTimelineNote() {
   const timeline = state.charts.get("timeline");
   const percent = state.timelineMode === "percent" && timeline?.percentAvailable;
+  // The percent mode used to replace the subtitle outright, taking the statement of
+  // what the line holds — and any complaint about undated money — with it. Switching
+  // the axis does not change either fact.
   byId("timelineNote").textContent = percent
-    ? `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`
+    ? [
+      `Тот же результат в процентах от внесённых денег — от ${formatUsd(timeline.percentBase)} за всё время.`,
+      state.timelineCoverage || "",
+    ].filter(Boolean).join(" ")
     : [state.timelineCoverage || "", state.timelineBridge || ""].filter(Boolean).join(" ");
 }
 
@@ -1867,20 +1878,32 @@ function prepareCharts(payload) {
   state.charts.set("extremes", extremeRows(payload));
 
   const drift = timeline.expected - timeline.dated;
-  const covered = Math.abs(timeline.expected) > 1
-    ? Math.abs(drift) / Math.abs(timeline.expected) < 0.001
-    : true;
+  // Two thresholds, because either alone has a blind spot. The relative one alone
+  // cannot judge a scope whose own rows net out to nothing — and dropping the
+  // account-level flows from `expected` made that reachable, so a narrowed class
+  // summing to zero declared full coverage over eight thousand dollars of real
+  // drift. The absolute one alone would cry at rounding on an account this size.
+  // A dollar of undated money is worth naming whatever the scope totals.
+  const covered = Math.abs(drift) <= 1
+    || (Math.abs(timeline.expected) > 1
+      && Math.abs(drift) / Math.abs(timeline.expected) < 0.001);
   // The dividend is bucketed by ex-date, which is what `realisedTimeline` reads and
   // which position earned it; the payment can land weeks later and in another year.
   // Sales are dated individually, not at the close of the cycle they belong to. The
   // account-level items are on the line too — except in the one case where the
   // composition block drops them as well, and then the caption must not promise them.
   const accountLevelOnLine = !scopeSummary(payload).undecomposable;
+  // The caveat states what the line holds, and that is true whether or not the
+  // self-check balanced — so it is a separate sentence rather than the alternative
+  // to the complaint. Printing only the complaint left the reader of a narrowed
+  // scope with no way to learn that interest, account fees and FX are missing from
+  // it, in exactly the case where the page had most to explain.
+  const contents = accountLevelOnLine
+    ? "Продажи, дивиденды по отсечке, сборы по инструментам, проценты брокера, сборы по счёту и FX-конверсии — по своим датам. Нереализованный P&L не входит."
+    : "Продажи, дивиденды по отсечке и сборы выбранных инструментов — по своим датам. Проценты брокера, сборы по счёту и FX-конверсии принадлежат счёту целиком и в этот срез не входят; нереализованный P&L не входит тоже.";
   state.timelineCoverage = covered
-    ? (accountLevelOnLine
-      ? "Продажи, дивиденды по отсечке, проценты брокера, сборы и FX-конверсии — по своим датам. Нереализованный P&L не входит."
-      : "Продажи и дивиденды по отсечке выбранных инструментов — по своим датам. Проценты брокера, сборы по счёту и FX-конверсии принадлежат счёту целиком и в этот срез не входят; нереализованный P&L не входит тоже.")
-    : `Закрытые сделки и дивиденды по датам. ${formatUsd(drift)} без даты в график не попали.`;
+    ? contents
+    : `${contents} ${formatUsd(drift)} без даты в график не попали.`;
 
   /*
    * The line ends short of the headline on purpose: the unrealised has no date, the
