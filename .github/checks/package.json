@@ -1,0 +1,13 @@
+{
+  "name": "portfolio-ledger-frontend-checks",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless browser checks for the published dashboard. Lives under .github/ because upload-pages-artifact tars the site with --exclude=.github, so nothing here can reach the published page.",
+  "scripts": {
+    "check": "node frontend-checks.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "24.23.0"
+  }
+}

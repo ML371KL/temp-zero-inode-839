@@ -1,0 +1,956 @@
+/**
+ * Headless browser checks for the published dashboard.
+ *
+ * They exist because everything this page does that matters happens after the payload
+ * is decrypted, in the browser, and none of it is reachable from the private
+ * repository's Python test suite. Locking has to actually remove the plaintext from
+ * the DOM; narrowing the asset-class scope has to move the header, the buildup and the
+ * table together or the page contradicts itself; a payload from a newer pipeline and a
+ * broken response from the server both have to end in a sentence rather than in a
+ * stack trace; and a string in the payload must never become markup.
+ *
+ * Every assertion is stated against the fixture's own decrypted payload rather than
+ * against numbers typed into this file, so regenerating the fixture does not silently
+ * turn the checks into assertions about nothing.
+ *
+ * Run: `npm ci && npx puppeteer browsers install chrome && node frontend-checks.mjs`
+ * from `.github/checks`. Nothing here reads a path outside the repository except the
+ * browser itself; `CHECKS_CHROME_PATH` overrides which browser is used when the
+ * machine already has one.
+ */
+
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import puppeteer from "puppeteer";
+
+import { decryptEnvelope, encryptEnvelope } from "./lib/envelope.mjs";
+import { startSite } from "./lib/site-server.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SITE_ROOT = path.resolve(HERE, "..", "..");
+const FIXTURE_DIR = path.join(HERE, "fixtures");
+const FIXTURE_FILE = path.join(FIXTURE_DIR, "portfolio.fixture.enc");
+const PASSWORD_FILE = path.join(FIXTURE_DIR, "PASSWORD.txt");
+
+// PBKDF2 at the pipeline's 600 000 iterations is roughly a second of a CI runner's CPU,
+// and the first navigation also compiles a 177 KB module. Both are well inside this;
+// it is here so a genuine hang fails the job instead of hitting the workflow's own
+// six-hour ceiling.
+const UNLOCK_TIMEOUT_MS = 60_000;
+// The scope filter, the chart redraw after a resize and the search debounce are all
+// driven by listeners rather than by anything a promise can be attached to.
+const SETTLE_MS = 450;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Console noise the machine running the checks is responsible for, not the page.
+ *
+ * Empty on a CI runner and expected to stay that way. It exists because a developer
+ * machine can have a security suite that rewrites responses on the way to the browser
+ * — the one this was written against injects its own hosts into the page's
+ * Content-Security-Policy, mangling `form-action 'none'` into `form-action 'none'
+ * child-src …` and drawing two parser errors that have nothing to do with the code.
+ * `detectEnvironmentNoise` only ever adds to this after proving the page the browser
+ * received is not the page in the repository, so a real CSP mistake still fails.
+ */
+let environmentAllowances = [];
+const goto = (page, origin) =>
+  // `domcontentloaded` rather than `networkidle0`: every scenario below states its own
+  // readiness condition — an enabled unlock button, a drawn table, a message in the
+  // form — and waiting for the network to go quiet on top of that only added a way for
+  // a scenario that deliberately breaks the payload request to time out instead of
+  // being checked.
+  page.goto(`${origin}/`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+
+/* ------------------------------------------------------------------ report --- */
+
+class Report {
+  constructor() {
+    this.results = [];
+  }
+
+  record(name, failures, note = "") {
+    this.results.push({ name, failures, note });
+    const mark = failures.length ? "FAIL" : "ok  ";
+    process.stdout.write(`${mark}  ${name}${note ? ` — ${note}` : ""}\n`);
+    for (const failure of failures) process.stdout.write(`      · ${failure}\n`);
+  }
+
+  get failed() {
+    return this.results.filter((item) => item.failures.length);
+  }
+
+  summarize() {
+    const total = this.results.length;
+    const failed = this.failed.length;
+    process.stdout.write(
+      `\n${total - failed}/${total} checks passed`
+      + (failed ? `; failing: ${this.failed.map((item) => item.name).join(", ")}` : "")
+      + "\n",
+    );
+    return failed === 0;
+  }
+}
+
+/* -------------------------------------------------------------- page setup --- */
+
+/**
+ * A page in its own browser context, watching for anything the console reports.
+ *
+ * Its own context per scenario because the page remembers the asset-class scope in
+ * localStorage and can remember a decryption key in IndexedDB: a scenario that
+ * inherited either would be testing the previous scenario's leftovers.
+ */
+async function openPage(browser, { viewport = { width: 1280, height: 900 } } = {}) {
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
+  await page.setViewport(viewport);
+  const consoleErrors = [];
+  const pageErrors = [];
+  // Only `error`. Chrome files its own advice — "password forms should have a username
+  // field", deprecation notices — as `verbose` and `warning`, and failing on those
+  // would make the checks a running commentary on the browser rather than on the page.
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => pageErrors.push(`${error.name}: ${error.message}`));
+  return {
+    page,
+    consoleErrors,
+    pageErrors,
+    async close() {
+      await context.close();
+    },
+  };
+}
+
+/**
+ * Console noise that is a failure everywhere except in the scenario that caused it.
+ *
+ * `allow` holds the patterns a deliberately broken scenario is entitled to produce —
+ * the browser logs a failed request for the payload as a console error, and refusing
+ * to allow that would mean no scenario could ever serve a 500. Nothing else is
+ * forgiven, and an uncaught exception is never forgiven: `pageerror` means a render
+ * path threw, which is the failure mode all of this exists to catch.
+ */
+function consoleFailures(session, allow = []) {
+  const failures = [];
+  const forgiven = [...allow, ...environmentAllowances];
+  for (const text of session.consoleErrors) {
+    if (forgiven.some((pattern) => pattern.test(text))) continue;
+    failures.push(`console error: ${text}`);
+  }
+  for (const text of session.pageErrors) failures.push(`uncaught: ${text}`);
+  return failures;
+}
+
+/**
+ * Prove the browser got the page the repository holds — and say so when it did not.
+ *
+ * The comparison is the Content-Security-Policy, because that is the one line of
+ * index.html an interfering proxy has a reason to rewrite and the one whose rewrite is
+ * noisy: Chrome reports the mangled policy as two console errors on every page load,
+ * which would fail every check for a reason that exists only on that machine. Proving
+ * the tampering before forgiving the noise is what keeps this from being a blanket
+ * exemption for CSP problems the page really does have.
+ */
+async function detectEnvironmentNoise(browser, origin, report) {
+  const session = await openPage(browser);
+  try {
+    await goto(session.page, origin);
+    const served = await session.page.evaluate(
+      () => document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content ?? "",
+    );
+    const onDisk = readFileSync(path.join(SITE_ROOT, "index.html"), "utf8")
+      .match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/)?.[1] ?? "";
+    if (!onDisk) {
+      report.record("index.html declares a Content-Security-Policy", [
+        "no Content-Security-Policy meta tag found in index.html",
+      ]);
+      return;
+    }
+    if (served === onDisk) {
+      report.record("the browser receives the page the repository holds", []);
+      return;
+    }
+    environmentAllowances = [/Content-Security-Policy/i];
+    report.record(
+      "the browser receives the page the repository holds",
+      [],
+      "NOTE: something on this machine rewrote the page's Content-Security-Policy in "
+      + "flight, so CSP parser errors are ignored for this run. This cannot happen on a "
+      + `runner. Served policy: ${served.slice(0, 160)}…`,
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+async function unlock(page, password) {
+  await page.waitForSelector("#unlockButton:not([disabled])", { timeout: UNLOCK_TIMEOUT_MS });
+  await page.type("#passwordInput", password);
+  await page.click("#unlockButton");
+  await page.waitForFunction(
+    () => !document.getElementById("dashboardView").hidden,
+    { timeout: UNLOCK_TIMEOUT_MS },
+  );
+  await page.waitForFunction(
+    () => document.querySelectorAll("#portfolioBody tr.data-row").length > 0,
+    { timeout: UNLOCK_TIMEOUT_MS },
+  );
+}
+
+/* ----------------------------------------------------------------- parsing --- */
+
+/**
+ * Read a number back out of what the page printed.
+ *
+ * The page formats in ru-RU: a non-breaking space groups the thousands, a comma is the
+ * decimal separator and the currency symbol trails. Stripping everything that is not a
+ * digit, a comma or a sign is enough, and is deliberately blind to which currency
+ * symbol was used — the checks compare magnitudes across blocks, not formatting.
+ */
+function parseMoney(text) {
+  if (text === null || text === undefined) return null;
+  const cleaned = String(text)
+    .replace(/[−–—]/g, "-")
+    .replace(/[^\d,\-]/g, "")
+    .replace(",", ".");
+  if (!/\d/.test(cleaned)) return null;
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+const numberOf = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const close = (left, right, tolerance = 0.02) =>
+  left !== null && right !== null && Math.abs(left - right) <= tolerance;
+
+/* ------------------------------------------------- check 1: lock leaves nothing --- */
+
+/**
+ * Everything a reader could get at without a debugger.
+ *
+ * Four sources, and each of them earns its place. `outerHTML` is the markup, but it is
+ * not enough on its own: it serialises U+00A0 back to `&nbsp;`, so an amount the page
+ * printed as "25 751,19 $" appears in it as `25&nbsp;751,19&nbsp;$` and no amount of
+ * whitespace-stripping will find "25751" in that — a leak of every money figure on the
+ * page hid behind exactly this while the check reported green. `textContent` is the
+ * same text with the entities resolved, and unlike `innerText` it reads hidden
+ * subtrees, which is the whole point when locking works by hiding a container.
+ * Attribute values carry the tooltips and titles, and `value` carries what was typed
+ * into a field, neither of which appears in either of the first two.
+ */
+function domSnapshotScript() {
+  const html = document.documentElement.outerHTML;
+  const text = document.documentElement.textContent;
+  const attributes = [];
+  for (const element of document.querySelectorAll("*")) {
+    for (const attribute of element.attributes) attributes.push(attribute.value);
+  }
+  const values = Array.from(document.querySelectorAll("input, textarea, select"))
+    .map((node) => `${node.value}`);
+  return [html, text, attributes.join("\n"), values.join("\n")].join("\n");
+}
+
+// ru-RU groups thousands with U+00A0, and some builds use U+202F or U+2009.
+// Removing every kind of space is what lets "25 751,19 $" be searched for as "25751".
+const squash = (text) => text.replace(/[\s\u00A0\u202F\u2009]/g, "");
+
+/**
+ * The strings and magnitudes that only exist because the payload was decrypted.
+ *
+ * Deliberately derived from the payload rather than from a list of element ids: the
+ * incident this check is for was plaintext surviving in a node nobody had thought to
+ * clear, and a check that only looks where the code already looks would have missed it
+ * exactly as the code did. Anything already present on the locked page before the
+ * first unlock is dropped — that is page furniture, not portfolio.
+ */
+function secretsOf(payload) {
+  const words = new Set();
+  const numbers = new Set();
+
+  const addWord = (value) => {
+    const text = String(value ?? "").trim();
+    if (text.length >= 3) words.add(text);
+  };
+  const addNumber = (value) => {
+    const parsed = numberOf(value);
+    if (parsed === null) return;
+    // Both roundings of the integer part, because the page prints two decimals and the
+    // digits before the comma are the truncation — except when the cents carry, and
+    // then they are the rounding. Keeping only one of the two let a leak of −3 103,80
+    // through: rounded it is 3104, and 3104 appears nowhere on the page.
+    for (const magnitude of [Math.trunc(Math.abs(parsed)), Math.round(Math.abs(parsed))]) {
+      // Under a thousand the digits are too short to be evidence of anything: "150" is
+      // a share count and also the width of something in a stylesheet.
+      if (magnitude >= 1000) numbers.add(String(magnitude));
+    }
+  };
+
+  for (const row of payload.rows || []) {
+    addWord(row.symbol);
+    addWord(row.instrument);
+    addWord(row.conid);
+    addWord(row.assetClass);
+    addWord(row.exchange);
+    if (row.currency !== payload.baseCurrency) addWord(row.currency);
+    for (const historic of row.symbolHistory || []) addWord(historic);
+    for (const field of [
+      "marketValueUsd", "totalResultUsd", "realizedPnlUsd", "unrealizedPnlUsd",
+      "dividendsNetUsd", "openBasisUsd", "quantity",
+    ]) addNumber(row[field]);
+  }
+  for (const block of [payload.totals, payload.accountIdentity, payload.performance,
+    payload.allocation, payload.accountCash]) {
+    for (const value of Object.values(block || {})) addNumber(value);
+  }
+  addNumber(payload.cash?.endingCash);
+  for (const item of payload.quarantine?.fxInstruments || []) addWord(item.symbol);
+
+  return { words: [...words], numbers: [...numbers] };
+}
+
+async function checkLockLeavesNothing(ctx) {
+  const session = await openPage(ctx.browser);
+  const failures = [];
+  try {
+    const { page } = session;
+    await goto(page, ctx.site.origin);
+    const baseline = await page.evaluate(domSnapshotScript);
+    const baselineSquashed = squash(baseline);
+
+    await unlock(page, ctx.password);
+
+    // Fill in every corner the payload can reach before locking. Each of these was a
+    // real leak at some point: an expanded card, a chart tooltip left showing a symbol
+    // and an amount, and the search box holding what was typed into it.
+    await page.click("#portfolioBody tr.data-row");
+    await page.type("#searchInput", String(ctx.payload.rows[0].symbol).slice(0, 4));
+    await sleep(SETTLE_MS);
+    const tipTarget = await page.$("[data-tip-title]");
+    if (tipTarget) {
+      await tipTarget.hover();
+      await sleep(120);
+    }
+    const tooltipFilled = await page.$eval("#chartTooltip", (node) => node.innerHTML.length > 0);
+
+    await page.click("#lockButton");
+    await page.waitForFunction(
+      () => document.getElementById("dashboardView").hidden,
+      { timeout: 10_000 },
+    );
+    await sleep(120);
+
+    const locked = await page.evaluate(domSnapshotScript);
+    const lockedSquashed = squash(locked);
+    const { words, numbers } = secretsOf(ctx.payload);
+
+    for (const word of words) {
+      if (baseline.includes(word)) continue;
+      if (locked.includes(word)) failures.push(`"${word}" still readable in the locked page`);
+    }
+    for (const digits of numbers) {
+      if (baselineSquashed.includes(digits)) continue;
+      if (lockedSquashed.includes(digits)) {
+        failures.push(`the amount ${digits} still readable in the locked page`);
+      }
+    }
+    if (!tooltipFilled) {
+      failures.push("no chart tooltip was filled before locking, so the check never saw one");
+    }
+    failures.push(...consoleFailures(session));
+    ctx.report.record(
+      "lock removes every trace of the payload from the DOM",
+      failures,
+      `${words.length} names, ${numbers.length} amounts`,
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+/* --------------------------------------------- check 2: the scope agrees with itself --- */
+
+async function readScopeState(page) {
+  return page.evaluate(() => {
+    const cell = (row, selector) => row.querySelector(selector)?.textContent?.trim() ?? "";
+    const buildup = {};
+    for (const row of document.querySelectorAll("#buildupTable tr")) {
+      const label = cell(row, "th[scope=row]");
+      if (label) buildup[label] = cell(row, "td");
+    }
+    return {
+      resultCount: document.getElementById("resultCount")?.textContent?.trim() ?? "",
+      kpiContext: document.getElementById("kpiContext")?.textContent?.trim() ?? "",
+      tableRows: document.querySelectorAll("#portfolioBody tr.data-row").length,
+      groupCounts: [...document.querySelectorAll("#portfolioBody tr.group-row b")]
+        .map((node) => Number(node.textContent.trim())),
+      heroFigure: document.querySelector("#heroPanel .hero-figure")?.textContent?.trim() ?? "",
+      heroEyebrow: document.querySelector("#heroPanel .eyebrow")?.textContent?.trim() ?? "",
+      heroPositions: [...document.querySelectorAll("#heroPanel .hero-facts div")]
+        .map((node) => node.textContent.trim())
+        .find((text) => text.includes("Позиции")) ?? "",
+      buildup,
+    };
+  });
+}
+
+async function selectClasses(page, classes) {
+  await page.evaluate((picked) => {
+    const boxes = [...document.querySelectorAll("#assetScopeOptions input[type=checkbox]")];
+    for (const box of boxes) box.checked = picked.includes(box.value);
+    // One bubbling event: the page listens on the container, not on each box.
+    boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
+  }, classes);
+  await sleep(SETTLE_MS);
+}
+
+async function checkScopeConsistency(ctx) {
+  const session = await openPage(ctx.browser);
+  const failures = [];
+  try {
+    const { page } = session;
+    await goto(page, ctx.site.origin);
+    await unlock(page, ctx.password);
+
+    const rows = ctx.payload.rows || [];
+    const quarantined = new Set(
+      (ctx.payload.quarantine?.fxInstruments || []).map((item) => String(item.conid)),
+    );
+    const universe = [...new Set(rows.map((row) => String(row.assetClass || "—")))].sort();
+    const offered = await page.$$eval(
+      "#assetScopeOptions input[type=checkbox]",
+      (boxes) => boxes.map((box) => box.value).sort(),
+    );
+    if (offered.join(",") !== universe.join(",")) {
+      failures.push(`the filter offers [${offered}] but the payload holds [${universe}]`);
+    }
+
+    for (const assetClass of universe) {
+      await selectClasses(page, [assetClass]);
+      const view = await readScopeState(page);
+      const listed = rows.filter((row) => String(row.assetClass || "—") === assetClass);
+      // The table keeps quarantined rows and flags them; the summaries must not add
+      // them up. Both halves of that rule are asserted, because getting either one
+      // wrong is what makes the blocks disagree.
+      const trusted = listed.filter((row) => !quarantined.has(String(row.conid)));
+      const instrumentResult = trusted.reduce(
+        (sum, row) => sum + (numberOf(row.totalResultUsd) || 0), 0);
+
+      if (view.tableRows !== listed.length) {
+        failures.push(
+          `${assetClass}: the table draws ${view.tableRows} rows, the payload has ${listed.length}`);
+      }
+      const expectedCount = `${listed.length} из ${rows.length}`;
+      if (view.resultCount !== expectedCount) {
+        failures.push(`${assetClass}: the counter says "${view.resultCount}", expected "${expectedCount}"`);
+      }
+      const grouped = view.groupCounts.reduce((sum, value) => sum + value, 0);
+      if (view.groupCounts.length && grouped !== listed.length) {
+        failures.push(`${assetClass}: the group bands count ${grouped} rows, the table lists ${listed.length}`);
+      }
+      // Read as "the two numbers in the card", not by matching the Russian around them:
+      // `\w` in a JavaScript regular expression is ASCII, so anything spelled out here
+      // would fail on a word ending in Cyrillic and report a missing card instead.
+      const positions = view.heroPositions.match(/\d+/g) || [];
+      if (positions.length !== 2) {
+        failures.push(
+          `${assetClass}: the header does not state how many positions are listed `
+          + `— "${view.heroPositions}"`);
+      } else if (Number(positions[0]) + Number(positions[1]) !== listed.length) {
+        failures.push(
+          `${assetClass}: the header counts ${positions[0]}+${positions[1]} positions, `
+          + `the table lists ${listed.length}`);
+      }
+
+      const buildupTotal = parseMoney(view.buildup["Итог по инструментам"]);
+      if (buildupTotal === null) {
+        failures.push(`${assetClass}: the buildup has no instrument total to compare`);
+      } else if (!close(buildupTotal, instrumentResult, 0.02)) {
+        failures.push(
+          `${assetClass}: the buildup totals ${buildupTotal} over the rows it kept, `
+          + `the payload's own rows total ${instrumentResult.toFixed(2)}`);
+      }
+      // With money in quarantine the account cannot be split by class, so a narrowed
+      // header prints exactly the instrument total the buildup ends on. When it can be
+      // split the header is an account figure and this comparison does not apply.
+      const heroFigure = parseMoney(view.heroFigure);
+      if (quarantined.size && universe.length > 1 && !close(heroFigure, instrumentResult, 0.02)) {
+        failures.push(
+          `${assetClass}: the header shows ${heroFigure} while the same rows total `
+          + `${instrumentResult.toFixed(2)}`);
+      }
+      if (universe.length > 1 && !view.heroEyebrow.includes("·")) {
+        failures.push(`${assetClass}: the header does not say which classes it is describing`);
+      }
+      if (!view.kpiContext) {
+        failures.push(`${assetClass}: the KPI heading does not name the selection`);
+      }
+    }
+
+    // Back to everything: the counter has to return to the full row count, and the
+    // buildup total has to be the payload's own trusted total again.
+    await selectClasses(page, universe);
+    const whole = await readScopeState(page);
+    if (whole.tableRows !== rows.length) {
+      failures.push(`all classes: the table draws ${whole.tableRows} rows of ${rows.length}`);
+    }
+    const wholeTotal = parseMoney(whole.buildup["Итог по инструментам"]);
+    if (!close(wholeTotal, numberOf(ctx.payload.totals?.totalResultUsd), 0.02)) {
+      failures.push(
+        `all classes: the buildup totals ${wholeTotal}, the payload says `
+        + `${ctx.payload.totals?.totalResultUsd}`);
+    }
+
+    failures.push(...consoleFailures(session));
+    ctx.report.record(
+      "the header, the buildup and the table describe the same rows in every scope",
+      failures,
+      `${universe.length} classes`,
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+/* ---------------------------------------- check 3: unknown schema and broken responses --- */
+
+async function checkSchemaAndFailures(ctx) {
+  const failures = [];
+
+  // (a) A payload from a pipeline newer than this page.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      const future = { ...ctx.payload, schemaVersion: 99 };
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, future, ctx.password));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      const warning = await session.page.evaluate(() => {
+        const node = document.getElementById("schemaWarning");
+        return { hidden: node.hidden, text: node.textContent.trim() };
+      });
+      if (warning.hidden) failures.push("schema 99: the page shows no warning at all");
+      if (!warning.text.includes("99")) {
+        failures.push(`schema 99: the warning does not name the version — "${warning.text}"`);
+      }
+      const drawn = await session.page.$$eval("#portfolioBody tr.data-row", (nodes) => nodes.length);
+      if (drawn !== (ctx.payload.rows || []).length) {
+        failures.push(`schema 99: ${drawn} rows drawn, expected ${(ctx.payload.rows || []).length}`);
+      }
+      failures.push(...consoleFailures(session).map((item) => `schema 99: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (b) The server is broken. Nothing is decrypted, so the only thing the page can do
+  //     is say so and offer the retry — silently sitting on a disabled button is the
+  //     failure being guarded against.
+  const brokenResponses = [
+    ["500", { body: "upstream on fire", status: 500, type: "text/plain" }],
+    ["not JSON", { body: "<html>404 from a CDN</html>", status: 200, type: "text/html" }],
+    ["truncated JSON", { body: '{"format":"ibkr-portfolio-aes-gcm","ver', status: 200 }],
+  ];
+  for (const [label, response] of brokenResponses) {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(response.body, response);
+      await goto(session.page, ctx.site.origin);
+      await session.page.waitForFunction(
+        () => document.getElementById("unlockMessage").textContent.trim().length > 0
+          && !document.getElementById("retryLoad").hidden,
+        { timeout: 15_000 },
+      ).catch(() => {});
+      const view = await session.page.evaluate(() => ({
+        message: document.getElementById("unlockMessage").textContent.trim(),
+        retryOffered: !document.getElementById("retryLoad").hidden,
+        dashboardHidden: document.getElementById("dashboardView").hidden,
+      }));
+      if (!view.message) failures.push(`${label}: the page says nothing`);
+      if (!view.retryOffered) failures.push(`${label}: no way to retry the load`);
+      if (!view.dashboardHidden) failures.push(`${label}: the dashboard opened anyway`);
+      // A failed request for the payload is logged by the browser itself, and this
+      // scenario is the one that asked for it.
+      failures.push(...consoleFailures(session, [/portfolio\.enc/, /Failed to load resource/])
+        .map((item) => `${label}: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (c) A well-formed envelope in a format this page does not know.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve({ ...ctx.envelope, version: 99 });
+      await goto(session.page, ctx.site.origin);
+      await session.page.waitForFunction(
+        () => document.getElementById("unlockMessage").textContent.trim().length > 0,
+        { timeout: 15_000 },
+      ).catch(() => {});
+      const message = await session.page.$eval("#unlockMessage", (node) => node.textContent.trim());
+      if (!/формат/i.test(message)) {
+        failures.push(`envelope version 99: expected a message about the format, got "${message}"`);
+      }
+      failures.push(...consoleFailures(session).map((item) => `envelope version 99: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (d) The right password against a ciphertext that has been tampered with. AES-GCM
+  //     refuses to authenticate it, and the page has to report that as a failure to
+  //     open rather than as an exception out of WebCrypto.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      const bytes = Buffer.from(ctx.envelope.ciphertext, "base64");
+      bytes[Math.floor(bytes.length / 2)] ^= 0xff;
+      ctx.site.serve({ ...ctx.envelope, ciphertext: bytes.toString("base64") });
+      await goto(session.page, ctx.site.origin);
+      await session.page.waitForSelector("#unlockButton:not([disabled])", { timeout: UNLOCK_TIMEOUT_MS });
+      await session.page.type("#passwordInput", ctx.password);
+      await session.page.click("#unlockButton");
+      await session.page.waitForFunction(
+        () => /не подошёл|повреждён/i.test(document.getElementById("unlockMessage").textContent),
+        { timeout: UNLOCK_TIMEOUT_MS },
+      ).catch(() => {});
+      const view = await session.page.evaluate(() => ({
+        message: document.getElementById("unlockMessage").textContent.trim(),
+        dashboardHidden: document.getElementById("dashboardView").hidden,
+      }));
+      if (!/не подошёл|повреждён/i.test(view.message)) {
+        failures.push(`tampered ciphertext: expected a decryption failure, got "${view.message}"`);
+      }
+      if (!view.dashboardHidden) failures.push("tampered ciphertext: the dashboard opened anyway");
+      failures.push(...consoleFailures(session).map((item) => `tampered ciphertext: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  ctx.site.serve(ctx.envelope);
+  ctx.report.record("an unknown schema and a broken response are answered, not thrown", failures);
+}
+
+/* --------------------------------------------------------------- check 4: XSS --- */
+
+const XSS_SENTINEL = "XSSPROBE7";
+const XSS_PAYLOAD = `<img src=x onerror="window.__xssFired=(window.__xssFired||0)+1">`
+  + `<svg onload="window.__xssFired=(window.__xssFired||0)+1"></svg>`
+  + `"><script>window.__xssFired=(window.__xssFired||0)+1</script> ${XSS_SENTINEL}`;
+
+/**
+ * Poison the text fields of the payload, and only the text fields.
+ *
+ * Every amount in the payload is a *string* too — "68.40", not 68.4 — so a blanket
+ * walk over string values would replace the numbers with markup and the page would
+ * fail to draw for reasons that have nothing to do with escaping. The list is explicit
+ * for that reason, and the check afterwards insists the poison actually reached the
+ * DOM, so a field that stops being rendered turns into a failure instead of a
+ * silently vacuous pass.
+ */
+function poison(payload) {
+  const poisoned = structuredClone(payload);
+  for (const row of poisoned.rows || []) {
+    row.symbol = `${row.symbol} ${XSS_PAYLOAD}`;
+    row.instrument = `${row.instrument} ${XSS_PAYLOAD}`;
+    row.exchange = XSS_PAYLOAD;
+    row.symbolHistory = [XSS_PAYLOAD];
+    row.reviewReasons = [...(row.reviewReasons || []), XSS_PAYLOAD];
+    if (row.currentPrice) row.currentPrice.type = XSS_PAYLOAD;
+    for (const cycle of row.cycles || []) {
+      for (const event of cycle.cashEvents || []) event.description = XSS_PAYLOAD;
+    }
+  }
+  // A currency code that is not a currency code: `Intl.NumberFormat` throws on it and
+  // the page falls back to printing the code itself, which is a second place the
+  // string reaches the DOM and the only one that does not go through the table cell.
+  if (poisoned.rows?.[0]) poisoned.rows[0].currency = XSS_PAYLOAD;
+  for (const issue of poisoned.reconciliation?.issues || []) {
+    issue.message = `${issue.message} ${XSS_PAYLOAD}`;
+    if (Array.isArray(issue.symbols)) issue.symbols = [XSS_PAYLOAD];
+  }
+  for (const item of poisoned.quarantine?.fxInstruments || []) item.symbol = XSS_PAYLOAD;
+  if (poisoned.cash) poisoned.cash.source = XSS_PAYLOAD;
+  poisoned.globalReviewEvents = [
+    ...(poisoned.globalReviewEvents || []),
+    {
+      kind: "REVIEW",
+      eventId: "xss-probe",
+      source: XSS_PAYLOAD,
+      conid: "unknown",
+      symbol: XSS_PAYLOAD,
+      timestamp: poisoned.generatedAt,
+      category: "XSS_PROBE",
+      description: XSS_PAYLOAD,
+      raw: {},
+    },
+  ];
+  return poisoned;
+}
+
+async function checkXss(ctx) {
+  const session = await openPage(ctx.browser);
+  const failures = [];
+  try {
+    const { page } = session;
+    ctx.site.serve(await encryptEnvelope(ctx.envelope, poison(ctx.payload), ctx.password));
+    await goto(page, ctx.site.origin);
+    await unlock(page, ctx.password);
+    // Expand a card and open the issues panel too: the poisoned fields that never
+    // appear in the collapsed table live there.
+    await page.click("#portfolioBody tr.data-row");
+    await sleep(SETTLE_MS);
+
+    const verdict = await page.evaluate((sentinel) => {
+      const injectable = ["onerror", "onload", "onclick", "onmouseover", "onfocus"];
+      const withHandlers = [];
+      for (const element of document.querySelectorAll("*")) {
+        for (const attribute of element.attributes) {
+          if (injectable.includes(attribute.name.toLowerCase())) {
+            withHandlers.push(`${element.tagName.toLowerCase()}[${attribute.name}]`);
+          }
+        }
+      }
+      return {
+        fired: window.__xssFired ?? 0,
+        images: document.querySelectorAll("img, iframe, object, embed").length,
+        scripts: document.querySelectorAll("script").length,
+        withHandlers,
+        // The sentinel must be present as *text*: that is the proof the string reached
+        // the page at all and was rendered rather than parsed.
+        sentinelInText: (document.body.innerText.match(new RegExp(sentinel, "g")) || []).length,
+        escapedMarkup: document.body.innerHTML.includes("&lt;img"),
+      };
+    }, XSS_SENTINEL);
+
+    if (verdict.fired) failures.push(`injected handlers ran ${verdict.fired} time(s)`);
+    if (verdict.images) failures.push(`${verdict.images} injected element(s) exist in the DOM`);
+    if (verdict.scripts > 1) failures.push(`${verdict.scripts} <script> elements; the page has one`);
+    if (verdict.withHandlers.length) {
+      failures.push(`inline handlers present: ${verdict.withHandlers.slice(0, 5).join(", ")}`);
+    }
+    if (verdict.sentinelInText < 3) {
+      failures.push(
+        `the poison reached the page only ${verdict.sentinelInText} time(s) — `
+        + "the check is not looking at what it thinks it is");
+    }
+    if (!verdict.escapedMarkup) {
+      failures.push("no escaped markup anywhere: the injected tags were not rendered as text");
+    }
+    // The page's own Content-Security-Policy refuses inline script, so an injection
+    // that did get through would be reported here rather than silently executed.
+    failures.push(...consoleFailures(session));
+    ctx.report.record(
+      "payload strings are rendered as text and never as markup",
+      failures,
+      `${verdict.sentinelInText} sentinels rendered`,
+    );
+  } finally {
+    ctx.site.serve(ctx.envelope);
+    await session.close();
+  }
+}
+
+/* --------------------------------------- check 5: SVG validity and no sideways scroll --- */
+
+const WIDTHS = [320, 375, 414, 768, 1024, 1280, 1600, 1920];
+
+/**
+ * How much a clipping container may hide before it counts as broken layout.
+ *
+ * The page contains its own overflow: `.panel` is `overflow: hidden`, so a block that
+ * is too wide never makes the document scroll sideways — it is silently cut off
+ * instead, and the sideways-scroll test alone cannot see it. This second measurement
+ * is what does, and the tolerance is why it is not zero. It was 48 px when these checks
+ * were written, to forgive one known defect: `.select-filters` was 34 px wider than
+ * `.portfolio-panel` at exactly 768 px — the desktop filter row one breakpoint above
+ * where it starts scrolling — and clipped the edge of the "Сбросить" button. That row
+ * now has its own scrollport at every width, so the line is back where it belongs: low
+ * enough that a clipped control fails, high enough to ignore the couple of subpixels a
+ * chart rounds off at 320 px. Anything structural — a chart or a panel drawn hundreds
+ * of pixels too wide — was always far above it.
+ */
+const CLIP_TOLERANCE_PX = 6;
+
+async function checkLayoutAndSvg(ctx) {
+  const session = await openPage(ctx.browser, { viewport: { width: WIDTHS[0], height: 900 } });
+  const failures = [];
+  // Sub-tolerance clipping is printed rather than dropped: it is the only place these
+  // small responsive defects are visible at all, and a check that quietly forgives
+  // something should at least say what it forgave.
+  const clippedNotes = new Set();
+  let inspected = 0;
+  try {
+    const { page } = session;
+    await goto(page, ctx.site.origin);
+    await unlock(page, ctx.password);
+
+    for (const width of WIDTHS) {
+      await page.setViewport({ width, height: 900 });
+      // The charts are drawn at a measured pixel width, not into a scaled viewBox, so
+      // they redraw on a ResizeObserver after the layout settles. Reading before that
+      // measures the previous width's chart.
+      await sleep(SETTLE_MS);
+      const view = await page.evaluate(() => {
+        const problems = [];
+        let counted = 0;
+        for (const svg of document.querySelectorAll("svg")) {
+          counted += 1;
+          const viewBox = svg.getAttribute("viewBox");
+          if (viewBox) {
+            const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+            if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) {
+              problems.push(`viewBox="${viewBox}" is not four numbers`);
+            } else if (parts[2] <= 0 || parts[3] <= 0) {
+              problems.push(`viewBox="${viewBox}" has no area`);
+            }
+          }
+          const box = svg.getBoundingClientRect();
+          const drawn = svg.getClientRects().length > 0;
+          if (drawn && (box.width <= 0 || box.height <= 0)) {
+            problems.push(`a visible svg is ${box.width}×${box.height}`);
+          }
+          for (const element of [svg, ...svg.querySelectorAll("*")]) {
+            for (const attribute of element.attributes) {
+              if (/NaN|Infinity|undefined/.test(attribute.value)) {
+                problems.push(
+                  `${element.tagName.toLowerCase()}[${attribute.name}]="${attribute.value}"`);
+              }
+            }
+            if (element.tagName.toLowerCase() === "path" && !element.getAttribute("d")) {
+              problems.push("a <path> with no d");
+            }
+          }
+        }
+        // Blocks whose own content does not fit and which cut it off rather than
+        // scroll. Two exclusions, both deliberate: an element inside a scrollport is
+        // meant to extend past it — that is what the table's horizontal scroll is —
+        // and `text-overflow: ellipsis` is truncation the page asked for, which is how
+        // the instrument names and the row notes are meant to behave.
+        // `getAttribute("class")` rather than `.className`: on an SVG element the
+        // property is an SVGAnimatedString, and a failure naming
+        // "rect.[object SVGAnimatedString]" tells the reader nothing.
+        const name = (element) =>
+          `${element.tagName.toLowerCase()}.${element.getAttribute("class") || "-"}`.slice(0, 60);
+        const clipped = [];
+        for (const element of document.querySelectorAll("body *")) {
+          const style = getComputedStyle(element);
+          if (!["hidden", "clip"].includes(style.overflowX)) continue;
+          if (style.textOverflow === "ellipsis") continue;
+          const hidden = element.scrollWidth - element.clientWidth;
+          if (hidden <= 0 || element.clientWidth === 0) continue;
+          let scrollable = false;
+          for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+            if (["auto", "scroll"].includes(getComputedStyle(parent).overflowX)) {
+              scrollable = true;
+              break;
+            }
+          }
+          if (scrollable) continue;
+          clipped.push({ what: name(element), hidden });
+        }
+        return {
+          problems: [...new Set(problems)],
+          svgCount: counted,
+          documentWidth: document.documentElement.scrollWidth,
+          bodyWidth: document.body.scrollWidth,
+          innerWidth: window.innerWidth,
+          clipped,
+          // Anything sticking out past the viewport, named, so a failure says which
+          // element to look at instead of only that the page scrolls sideways.
+          overflowing: [...document.querySelectorAll("body *")]
+            .filter((node) => node.getBoundingClientRect().right > window.innerWidth + 1)
+            .slice(0, 5)
+            .map(name),
+        };
+      });
+      inspected = Math.max(inspected, view.svgCount);
+      // One pixel of slack: a fractional layout width rounds up to a scrollWidth one
+      // larger than the viewport without anything actually being cut off.
+      if (view.documentWidth > view.innerWidth + 1) {
+        failures.push(
+          `${width}px: the page scrolls sideways (${view.documentWidth} > ${view.innerWidth})`
+          + (view.overflowing.length ? ` — ${view.overflowing.join(", ")}` : ""));
+      }
+      if (view.bodyWidth > view.innerWidth + 1) {
+        failures.push(`${width}px: the body is ${view.bodyWidth} wide in a ${view.innerWidth} viewport`);
+      }
+      if (!view.svgCount) failures.push(`${width}px: no charts were drawn at all`);
+      for (const problem of view.problems) failures.push(`${width}px: ${problem}`);
+      for (const item of view.clipped) {
+        const line = `${width}px: ${item.what} hides ${item.hidden}px of its own content`;
+        if (item.hidden > CLIP_TOLERANCE_PX) failures.push(line);
+        else clippedNotes.add(line);
+      }
+    }
+
+    failures.push(...consoleFailures(session));
+    for (const note of clippedNotes) {
+      process.stdout.write(`      (tolerated, under ${CLIP_TOLERANCE_PX}px) ${note}\n`);
+    }
+    ctx.report.record(
+      "charts are valid SVG and nothing scrolls sideways from 320 to 1920 px",
+      failures,
+      `${WIDTHS.length} widths, ${inspected} svg nodes`,
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+/* -------------------------------------------------------------------- main --- */
+
+async function main() {
+  const envelope = JSON.parse(readFileSync(FIXTURE_FILE, "utf8"));
+  const password = readFileSync(PASSWORD_FILE, "utf8").trim();
+  const payload = await decryptEnvelope(envelope, password);
+
+  const site = await startSite(SITE_ROOT);
+  site.serve(envelope);
+  const browser = await puppeteer.launch({
+    headless: true,
+    // The sandbox is unavailable inside most CI containers, and this browser only ever
+    // visits a server this process started, on the loopback interface.
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    executablePath: process.env.CHECKS_CHROME_PATH || undefined,
+  });
+  const report = new Report();
+  const ctx = { browser, site, envelope, payload, password, report };
+
+  process.stdout.write(
+    `site: ${SITE_ROOT}\nfixture: ${payload.rows.length} rows, schema ${payload.schemaVersion}, `
+    + `generated ${payload.generatedAt}\n\n`,
+  );
+
+  try {
+    await detectEnvironmentNoise(browser, site.origin, report);
+    await checkLockLeavesNothing(ctx);
+    await checkScopeConsistency(ctx);
+    await checkSchemaAndFailures(ctx);
+    await checkXss(ctx);
+    await checkLayoutAndSvg(ctx);
+  } finally {
+    await browser.close();
+    await site.close();
+  }
+
+  return report.summarize() ? 0 : 1;
+}
+
+main().then(
+  (code) => process.exit(code),
+  (error) => {
+    process.stderr.write(`${error?.stack || error}\n`);
+    process.exit(1);
+  },
+);

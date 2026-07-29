@@ -6,3 +6,11 @@ Thumbs.db
 # time. It is written here by the pipeline and by local test builds, and committing it
 # to `main` would put an incompressible 436 KB blob into the history of the code.
 data/portfolio.enc
+
+# The browser harness pulls in ~100 packages and a 130 MB Chromium. Both are rebuilt
+# from `package-lock.json` on every run, here and on the runner.
+.github/checks/node_modules/
+# Written by `build_fixture_payload.py --plaintext` when someone wants to read the
+# synthetic payload. It is invented data and harmless, but there is no reason for a
+# generated file to be committed beside the generator that makes it.
+.github/checks/fixtures/*.json

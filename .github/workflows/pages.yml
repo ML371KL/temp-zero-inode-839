@@ -9,7 +9,17 @@ on:
     # reproducible from the private repository, and the page never reads more than the
     # current one. Keeping the two apart is what lets the site publish as often as it
     # likes without the repository growing.
-    branches: [main, payload]
+    # `main` is deliberately absent here: a push to it deploys only after "Frontend
+    # checks" has gone green on that same commit, via the workflow_run trigger below.
+    # Otherwise the browser checks would run beside the deployment rather than before
+    # it, and a leak-after-lock regression would be live for the minute it takes them
+    # to fail. `payload` stays on the direct trigger — it carries one encrypted blob,
+    # changes no site code, and the checks do not run on it at all.
+    branches: [payload]
+  workflow_run:
+    workflows: ["Frontend checks"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -23,6 +33,12 @@ concurrency:
 
 jobs:
   deploy:
+    # A workflow_run fires on completion, success or not, so the conclusion has to be
+    # tested here or a red check would deploy anyway. Every other trigger (the payload
+    # branch, a manual dispatch) carries no such context and passes straight through.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -33,8 +49,13 @@ jobs:
       # the site that no review would ever see.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Always the site from `main`, whichever branch triggered the run.
-          ref: main
+          # Always the site from `main`, whichever branch triggered the run — but on a
+          # workflow_run, the exact commit the checks passed on. A workflow_run job
+          # checks out the default branch's tip by default, and between the check
+          # finishing and the deployment starting `main` can move: the site deployed
+          # would then be code no browser check ever saw, which is the whole thing this
+          # gate exists to prevent.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
       - name: Take the payload from its own branch
         # Deploying the site without it would publish a page that cannot unlock, so a
         # missing payload fails here rather than silently going live.

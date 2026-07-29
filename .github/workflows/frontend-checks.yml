@@ -1,0 +1,66 @@
+name: Frontend checks
+
+on:
+  push:
+    # Everything except `payload`. That branch carries one encrypted blob and is
+    # force-pushed to a single commit several times a day; none of it is site code, so
+    # running a browser against it would burn a runner to re-prove that unchanged files
+    # still behave. Every other branch is code and gets checked, not just `main`.
+    branches-ignore: [payload]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Unlike the deployment workflow beside it, nothing here can publish, so a
+# compromised dependency in a browser test cannot reach the site.
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    # A whole browser run — Chromium download included — takes a couple of minutes.
+    # This ceiling exists so a page that hangs waiting for something fails the job
+    # rather than sitting on a runner until the six-hour default gives up.
+    timeout-minutes: 15
+    steps:
+      # Pinned to full commit SHAs, the same discipline the deployment workflow uses.
+      # A moved tag on any action in a repository that publishes a page is a change to
+      # the page that no review would ever see.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: .github/checks/package-lock.json
+
+      # Chromium is ~130 MB and identical for as long as the pinned puppeteer version
+      # is. Keyed on the lockfile: a puppeteer bump pins a different browser build, and
+      # a stale cache would then be silently ignored by the install step below.
+      - name: Restore the pinned browser
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('.github/checks/package-lock.json') }}
+
+      # `--ignore-scripts` and then an explicit browser install, rather than letting
+      # puppeteer's postinstall do it: npm 11 refuses unreviewed install scripts and
+      # would otherwise leave the package installed with no browser behind it, which
+      # surfaces much later as a launch failure instead of a failed install.
+      - name: Install the harness
+        working-directory: .github/checks
+        run: npm ci --ignore-scripts
+
+      - name: Install the browser
+        working-directory: .github/checks
+        run: npx puppeteer browsers install chrome
+
+      # The gate. Every check inside is a hard failure; the script exits non-zero if
+      # any of them found anything, and this job is what a branch protection rule or a
+      # `workflow_run` condition on the deployment should be pointed at.
+      - name: Run the checks
+        working-directory: .github/checks
+        run: node frontend-checks.mjs
