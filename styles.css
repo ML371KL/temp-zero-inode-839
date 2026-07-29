@@ -74,9 +74,16 @@
 
   --ink: #0e1a26;
   --ink-2: #4a5f72;
-  /* Same slate tone, darkened for WCAG AA: 4.99:1 on --surface and 4.60:1 on
-     --surface-raised (the old #6f8496 sat at 3.88 and 3.58). */
-  --ink-3: #5d7285;
+  /* Same slate tone, one step darker again. The previous #5d7285 was checked against
+     --surface only (4.99:1) and failed everywhere else it is actually painted: 4.31 on
+     --surface-sunken, 4.20 on the segmented track under the active button's shadow, and
+     4.13 on the topbar caption where the page gradient is at its strongest — measured
+     pixel by pixel off a screenshot at 360 px, not derived from the token values. This
+     value clears 4.5 on every one of them, worst case 4.69. One token with one
+     guarantee rather than a second token for the sunken surface: the worst background
+     turned out not to be the sunken surface at all, so a token keyed to it would have
+     missed the failure that mattered. */
+  --ink-3: #57697b;
 
   --accent: #0f8c70;
   --accent-ink: #ffffff;
@@ -121,9 +128,9 @@
 
     --ink: #0e1a26;
     --ink-2: #4a5f72;
-    /* Same slate tone, darkened for WCAG AA: 4.99:1 on --surface and 4.60:1 on
-       --surface-raised (the old #6f8496 sat at 3.88 and 3.58). */
-    --ink-3: #5d7285;
+    /* Kept identical to the [data-theme="light"] block above, where the contrast
+       measurements behind this value are written down. */
+    --ink-3: #57697b;
 
     --accent: #0f8c70;
     --accent-ink: #ffffff;
@@ -267,7 +274,14 @@ button { color: inherit; }
 }
 .intro-copy h1 em { color: var(--accent); font-style: normal; }
 .intro-text { max-width: 560px; margin: 26px 0 0; color: var(--ink-2); font-size: 15px; line-height: 1.75; }
-.security-note { display: inline-flex; gap: 10px; align-items: center; margin-top: 28px; color: var(--ink-3); font: 400 11px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+/* One step up the ink ramp from the caption it looks like, because of where it sits.
+   This is the only tertiary text on the page painted straight onto the page background,
+   and the two blurred ambient blobs pass under it: measured across five viewports the
+   darkest pixel behind this line is #c3dce3 in light and #122e39 in dark, which drags
+   --ink-3 down to 3.48 and 4.04. No darkening of --ink-3 rescues it — even with the
+   blobs at a third of their opacity it lands at 4.38 — so the line takes --ink-2
+   instead: 4.63 worst in light, 6.45 in dark. */
+.security-note { display: inline-flex; gap: 10px; align-items: center; margin-top: 28px; color: var(--ink-2); font: 400 11px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
 .security-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
 
 .unlock-card {
@@ -674,7 +688,14 @@ button { color: inherit; }
 .quick-tabs button { min-height: 28px; border: 0; border-radius: 7px; padding: 4px 14px; color: var(--ink-2); background: transparent; font-size: 13px; cursor: pointer; }
 .quick-tabs button:hover { color: var(--ink); }
 .quick-tabs button.active { color: var(--ink); background: var(--surface); box-shadow: var(--shadow-soft); }
-.select-filters { display: flex; gap: 7px; align-items: center; }
+/* `min-width: 0` and its own scrollport at every width, not only under 760px: between
+   761 and about 830 the row is still laid out as a desktop row but no longer fits, and
+   it clipped 34px off the edge of the last control — the browser checks had to forgive
+   48px of hidden content to stay green, which is a blind spot the size of a button. */
+.select-filters {
+  display: flex; gap: 7px; align-items: center;
+  min-width: 0; overflow-x: auto; scrollbar-width: thin;
+}
 select, .scope-filter > summary {
   min-height: 32px; border: 1px solid var(--line); border-radius: 8px; outline: 0;
   padding: 4px 24px 4px 9px; color: var(--ink-2); background: var(--surface-raised);

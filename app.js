@@ -3087,6 +3087,8 @@ portfolioBody.addEventListener("keydown", (event) => {
 
 const ISSUE_TITLES = {
   SETTLEMENT_DAY_UNKNOWN: "Выписку не удалось привязать ко дню",
+  MARK_DATE_MISMATCH: "Марка брокера снята не в день остатков",
+  CASH_DATE_BORROWED: "День остатков взят из снимка позиций",
   QUANTITY_MISMATCH: "Количество не совпадает с IBKR",
   AVCO_IBKR_BASIS_DIFFERENCE: "AVCO отличается от базиса IBKR",
   BASIS_NOT_COMPARABLE: "Базис сравнить не удалось",
@@ -3115,6 +3117,8 @@ const ISSUE_TITLES = {
 // explanation it wins, and the raw message stays as the fallback for anything new.
 const ISSUE_EXPLANATIONS = {
   SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, а итог по счёту не с чем сверить.",
+  MARK_DATE_MISMATCH: "Расчётная цена маржинального контракта у брокера относится не к тому дню, на который сняты остатки по счёту. Оценить контракт по такой цене нельзя: вариационная маржа за прошедшие дни уже лежит в кэше, и стоимость контракта учла бы её второй раз. Контракты оставлены вне стоимости счёта, а замыкающее тождество на этот день не проверялось — расхождение, если оно есть, сейчас не видно.",
+  CASH_DATE_BORROWED: "У остатков по счёту не было читаемой даты, поэтому днём баланса взята дата снимка позиций. Если снимок и остатки на самом деле относятся к разным дням, стоимость счёта, оценка маржинальных контрактов и замыкающее тождество описывают не тот день — и расхождение спишется на цифры, хотя причина в дате.",
   QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
   AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
   BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
@@ -3148,6 +3152,7 @@ const SEVERITY_RANK = { ERROR: 0, WARNING: 1, INFO: 2 };
 // sentence can introduce the list that follows it.
 const ISSUE_EXPLANATIONS_WITH_SYMBOLS = {
   SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — и перечисленные контракты в стоимость счёта не входят:",
+  MARK_DATE_MISMATCH: "Расчётная цена у брокера относится не к тому дню, на который сняты остатки по счёту, поэтому оценить контракт нечем: вариационная маржа за прошедшие дни уже лежит в кэше и была бы учтена второй раз. Замыкающее тождество на этот день не проверялось, а в стоимость счёта не вошли контракты:",
 };
 
 const ISSUE_COUNT_UNITS = {
@@ -3157,6 +3162,7 @@ const ISSUE_COUNT_UNITS = {
   // Counts contracts, not positions — the default unit printed "3 позиц." on a page
   // listing twenty-two of them.
   SETTLEMENT_DAY_UNKNOWN: "контр.",
+  MARK_DATE_MISMATCH: "контр.",
 };
 
 function issueNumbers(issue) {
@@ -3392,9 +3398,31 @@ byId("togglePassword").addEventListener("click", () => {
 });
 
 byId("lockButton").addEventListener("click", () => lockDashboard());
+/*
+ * Lock first, delete second. `forgetDeviceKeys` opens IndexedDB and can reject —
+ * storage denied in a private window, the database blocked by another tab of the same
+ * page, a quota error — and with the await ahead of the lock a rejection took the
+ * handler out before `lockDashboard` ever ran. The button whose whole meaning is
+ * "stop trusting this device" then left the entire portfolio on screen.
+ *
+ * So the half that costs nothing and cannot fail goes first, and the removal is
+ * reported afterwards onto the already-locked screen. The failure message says what is
+ * actually true: the dashboard is closed, the stored key may still be on the device.
+ */
 byId("forgetDevice").addEventListener("click", async () => {
-  await forgetDeviceKeys();
-  lockDashboard("Сохранённый ключ удалён с этого устройства.");
+  lockDashboard("Удаляем сохранённый ключ…");
+  let outcome;
+  try {
+    await forgetDeviceKeys();
+    outcome = "Сохранённый ключ удалён с этого устройства.";
+  } catch {
+    outcome = "Ключ с этого устройства удалить не удалось: дашборд заблокирован, но сохранённый ключ мог остаться в хранилище браузера — очистите данные сайта.";
+  }
+  // Same rule the refresh handler follows: whoever comes back after an await has to
+  // check that the screen is still the one it was talking to. Unlocking again inside
+  // the storage round trip would otherwise leave this line waiting on the unlock form
+  // for the next lock, describing something that happened two sessions ago.
+  if (!state.cryptoKey) unlockMessage.textContent = outcome;
 });
 
 byId("refreshButton").addEventListener("click", async () => {
@@ -3424,17 +3452,30 @@ byId("refreshButton").addEventListener("click", async () => {
       ? `Обновлено: ${formatDate(payload.generatedAt, true)}`
       : "Новых данных пока нет";
   } catch (error) {
+    // The same rule as the success path, which the failure paths were exempt from:
+    // locking during a request that then failed wrote "Ошибка" and the error text into
+    // a toolbar the lock had just emptied. `lockDashboard` puts both nodes back to
+    // their resting text itself, so the correct action here is none at all.
+    if (!state.cryptoKey) return;
     label.textContent = "Ошибка";
     feedback.textContent = error.message || "Не удалось обновить данные.";
   } finally {
+    // These three run whatever happened. The button is hidden by the lock, not reset by
+    // the unlock, so a spinning disabled button left behind here would still be
+    // spinning and disabled the next time the dashboard opens.
     button.disabled = false;
     button.removeAttribute("aria-busy");
     button.classList.remove("is-refreshing");
-    state.refreshTimer = window.setTimeout(() => {
-      label.textContent = "Обновить";
-      feedback.textContent = "";
-      state.refreshTimer = null;
-    }, 3200);
+    // The timer is the opposite case: every early return above lands here too, and
+    // arming it against a locked page scheduled one more write into the cleared nodes
+    // three seconds after the lock — long after the button that owns it went away.
+    if (state.cryptoKey) {
+      state.refreshTimer = window.setTimeout(() => {
+        label.textContent = "Обновить";
+        feedback.textContent = "";
+        state.refreshTimer = null;
+      }, 3200);
+    }
   }
 });
 
@@ -3454,11 +3495,53 @@ document.querySelector("thead").addEventListener("click", (event) => {
   renderRows();
 });
 
+/**
+ * One place that says which tab is chosen, in all four ways it has to be said: the
+ * class the design draws, `aria-selected` for anything that is not looking at the
+ * screen, the roving tab stop that keeps the whole group one Tab press wide, and the
+ * label of the panel the tabs switch. They used to be one class, and the reset button
+ * set that class by hand — so any of them could drift out of step with the others.
+ */
+function setActiveTab(button, { focus = false } = {}) {
+  if (!button) return;
+  state.activeTab = button.dataset.tab;
+  for (const item of byId("quickTabs").querySelectorAll("button[data-tab]")) {
+    const chosen = item === button;
+    item.classList.toggle("active", chosen);
+    item.setAttribute("aria-selected", String(chosen));
+    // Arrow keys move between the tabs; Tab moves past the whole group. Only the
+    // chosen tab is in the document's tab order, which is what makes that true.
+    item.tabIndex = chosen ? 0 : -1;
+  }
+  byId("instrumentsTable").setAttribute("aria-labelledby", button.id);
+  if (focus) button.focus();
+}
+
 byId("quickTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-tab]");
   if (!button) return;
-  state.activeTab = button.dataset.tab;
-  byId("quickTabs").querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
+  setActiveTab(button);
+  renderRows();
+});
+
+// The arrow-key half of the tablist pattern, with activation following focus: these
+// tabs are a filter, so the list under them should change as the caret moves, exactly
+// as it does when the tab is clicked.
+byId("quickTabs").addEventListener("keydown", (event) => {
+  const tabs = [...byId("quickTabs").querySelectorAll("button[data-tab]")];
+  const current = tabs.indexOf(event.target.closest("button[data-tab]"));
+  if (current < 0) return;
+  let next = current;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = tabs.length - 1;
+  else return;
+  // Home and End otherwise scroll the page out from under the control being used, and
+  // the arrows scroll the filter row sideways on a phone, where it is a scroller.
+  event.preventDefault();
+  if (next === current) return;
+  setActiveTab(tabs[next], { focus: true });
   renderRows();
 });
 
@@ -3502,9 +3585,7 @@ byId("resetFilters").addEventListener("click", () => {
   state.assetScope = new Set();
   persistScope();
   byId("searchInput").value = "";
-  state.activeTab = "all";
-  byId("quickTabs").querySelectorAll("button")
-    .forEach((item) => item.classList.toggle("active", item.dataset.tab === "all"));
+  setActiveTab(byId("quickTabs").querySelector('button[data-tab="all"]'));
   redrawScopedBlocks();
 });
 
