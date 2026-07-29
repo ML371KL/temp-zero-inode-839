@@ -1942,16 +1942,15 @@ function prepareCharts(payload) {
   // nothing to divide by would just produce an empty plot.
   const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
   percentButton.disabled = !timeline.percentAvailable;
-  // Three reasons to withhold it, and the tooltip has to name the right one — it
-  // used to name the first for all of them, explaining an absence of deposits on a
-  // page that prints their total two lines below.
+  // The denominator is the *dated* funding, and it can be missing three different
+  // ways: no funding at all, funding that nets to zero, and funding whose rows carry
+  // no timestamp. The old wording named only the first, so a page printing "Внесено
+  // минус выведено 808 290,14 $" two lines below claimed there were no deposits.
   percentButton.title = timeline.percentAvailable
     ? "Тот же результат в процентах от внесённых денег"
     : scopeSummary(payload).undecomposable
       ? "Недоступно: пока часть денег в карантине, доля счёта не делится по классам — знаменателем был бы весь счёт, а числителем только выбранные инструменты"
-      : timeline.percentBase === null
-        ? "Недоступно: в снимке нет внесений (Deposits/Withdrawals)"
-        : "Недоступно: для линии в процентах нужно хотя бы два месяца с движением";
+      : "Недоступно: делить не на что — внесения с датами в сумме дают ноль или их нет в снимке";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
@@ -3115,7 +3114,7 @@ const ISSUE_TITLES = {
 // The pipeline emits English messages; the page is Russian. Where a type has a known
 // explanation it wins, and the raw message stays as the fallback for anything new.
 const ISSUE_EXPLANATIONS = {
-  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — и перечисленные контракты в стоимость счёта не попадают вовсе.",
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, а итог по счёту не с чем сверить.",
   QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
   AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
   BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
@@ -3196,11 +3195,17 @@ function renderIssues(payload) {
     const title = ISSUE_TITLES[issue.type] || issue.type;
     const explanation = ISSUE_EXPLANATIONS[issue.type] || issue.message || "";
     const numbers = issueNumbers(issue);
+    // An issue can name the instruments it is about. The explanation says "the
+    // contracts listed", and until this was rendered there was no list — the field
+    // arrived from the pipeline and nothing read it.
+    const named = Array.isArray(issue.symbols) && issue.symbols.length
+      ? ` ${issue.symbols.join(", ")}.`
+      : "";
     return `
       <div class="issue-item ${escapeHtml(tone)}">
         <span class="severity">${escapeHtml(severity)}</span>
         <span class="issue-type">${escapeHtml(issue.symbol ? `${issue.symbol} · ${title}` : title)}</span>
-        <span class="issue-message">${numbers ? `${escapeHtml(numbers)} — ` : ""}${escapeHtml(explanation)}</span>
+        <span class="issue-message">${numbers ? `${escapeHtml(numbers)} — ` : ""}${escapeHtml(explanation + named)}</span>
       </div>
     `;
   }).join("");
