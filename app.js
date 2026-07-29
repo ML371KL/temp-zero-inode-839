@@ -1942,9 +1942,14 @@ function prepareCharts(payload) {
   // nothing to divide by would just produce an empty plot.
   const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
   percentButton.disabled = !timeline.percentAvailable;
+  // Two reasons to withhold it now, and the tooltip has to name the right one: the
+  // quarantine reason was added later and left the button explaining an absence of
+  // deposits on a page that prints their total two lines below.
   percentButton.title = timeline.percentAvailable
     ? "Тот же результат в процентах от внесённых денег"
-    : "Недоступно: в снимке нет внесений (Deposits/Withdrawals)";
+    : scopeSummary(payload).undecomposable
+      ? "Недоступно: пока часть денег в карантине, доля счёта не делится по классам — знаменателем был бы весь счёт, а числителем только выбранные инструменты"
+      : "Недоступно: в снимке нет внесений (Deposits/Withdrawals)";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
