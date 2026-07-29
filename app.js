@@ -1365,11 +1365,19 @@ function realisedTimeline(payload) {
   const scoped = scopedRows();
   const sumRows = (key) =>
     scoped.reduce((total, row) => total + (numberValue(row[key]) || 0), 0);
+  // ...and over the same *sources*. When the account-level flows are kept off the
+  // line above, adding them here makes the check disagree with the line by exactly
+  // their total — twenty thousand dollars on this account — so the page reported
+  // that much as "undated", which is false: those movements have dates, they were
+  // deliberately left out. Worse, the discrepancy swallowed the check: any genuinely
+  // undated drift smaller than it became invisible.
   const expected = sumRows("realizedPnlUsd")
     + sumRows("dividendsNetUsd")
     + sumRows("otherFeesUsd")
-    + (payload.accountCashFlows || [])
-      .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0);
+    + (accountLevelBelongsHere
+      ? (payload.accountCashFlows || [])
+        .reduce((total, flow) => total + (numberValue(flow.amountUsd) || 0), 0)
+      : 0);
   const yearList = [...years.entries()].sort((left, right) => left[0] - right[0]);
   return {
     points,
@@ -3049,6 +3057,7 @@ portfolioBody.addEventListener("keydown", (event) => {
 /* ----------------------------------------------------------------- issues --- */
 
 const ISSUE_TITLES = {
+  SETTLEMENT_DAY_UNKNOWN: "Выписку не удалось привязать ко дню",
   QUANTITY_MISMATCH: "Количество не совпадает с IBKR",
   AVCO_IBKR_BASIS_DIFFERENCE: "AVCO отличается от базиса IBKR",
   BASIS_NOT_COMPARABLE: "Базис сравнить не удалось",
@@ -3076,6 +3085,7 @@ const ISSUE_TITLES = {
 // The pipeline emits English messages; the page is Russian. Where a type has a known
 // explanation it wins, and the raw message stays as the fallback for anything new.
 const ISSUE_EXPLANATIONS = {
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но ни у них, ни у остатков нет даты. Пока её нет, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — поэтому такие контракты в стоимость счёта не попадают вовсе.",
   QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
   AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
   BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
