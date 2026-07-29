@@ -1942,14 +1942,16 @@ function prepareCharts(payload) {
   // nothing to divide by would just produce an empty plot.
   const percentButton = byId("timelineMode").querySelector('button[data-mode="percent"]');
   percentButton.disabled = !timeline.percentAvailable;
-  // Two reasons to withhold it now, and the tooltip has to name the right one: the
-  // quarantine reason was added later and left the button explaining an absence of
-  // deposits on a page that prints their total two lines below.
+  // Three reasons to withhold it, and the tooltip has to name the right one — it
+  // used to name the first for all of them, explaining an absence of deposits on a
+  // page that prints their total two lines below.
   percentButton.title = timeline.percentAvailable
     ? "Тот же результат в процентах от внесённых денег"
     : scopeSummary(payload).undecomposable
       ? "Недоступно: пока часть денег в карантине, доля счёта не делится по классам — знаменателем был бы весь счёт, а числителем только выбранные инструменты"
-      : "Недоступно: в снимке нет внесений (Deposits/Withdrawals)";
+      : timeline.percentBase === null
+        ? "Недоступно: в снимке нет внесений (Deposits/Withdrawals)"
+        : "Недоступно: для линии в процентах нужно хотя бы два месяца с движением";
   if (!timeline.percentAvailable && state.timelineMode === "percent") {
     state.timelineMode = "absolute";
     byId("timelineMode").querySelectorAll("button")
@@ -3113,7 +3115,7 @@ const ISSUE_TITLES = {
 // The pipeline emits English messages; the page is Russian. Where a type has a known
 // explanation it wins, and the raw message stays as the fallback for anything new.
 const ISSUE_EXPLANATIONS = {
-  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но ни у них, ни у остатков нет даты. Пока её нет, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — поэтому такие контракты в стоимость счёта не попадают вовсе.",
+  SETTLEMENT_DAY_UNKNOWN: "В выписке есть позиции, но день, на который снят баланс, установить не удалось: либо у позиций нет даты, либо её нет у остатков, либо она есть, но не является датой. Пока это так, маржинальный контракт, открытый после снятия баланса, неотличим от того, что брокер уже рассчитал, — и перечисленные контракты в стоимость счёта не попадают вовсе.",
   QUANTITY_MISMATCH: "Рассчитанное количество не совпадает с Open Positions IBKR. Это учётная ошибка, а не разница методов.",
   AVCO_IBKR_BASIS_DIFFERENCE: "Локальный AVCO намеренно отличается от налоговых лотов IBKR (FIFO). Количество при этом сходится.",
   BASIS_NOT_COMPARABLE: "IBKR не отдал пригодный базис либо нет базовой стоимости для сравнения. Себестоимость по этой позиции не сверена.",
@@ -3147,6 +3149,9 @@ const ISSUE_COUNT_UNITS = {
   QUARANTINED_FX_EXECUTIONS: "исполн.",
   QUARANTINED_CASH: "событ.",
   UNCLASSIFIED_CASH_IN_RESULT: "событ.",
+  // Counts contracts, not positions — the default unit printed "3 позиц." on a page
+  // listing twenty-two of them.
+  SETTLEMENT_DAY_UNKNOWN: "контр.",
 };
 
 function issueNumbers(issue) {
