@@ -598,6 +598,10 @@ button { color: inherit; }
 .chart-tooltip small { color: var(--ink-3); font-size: 11px; line-height: 1.4; }
 
 .chart-table { padding-top: 4px; }
+/* Sits under the block it explains, so it reads the same whether the composition is
+   shown as bars or as a table — a caption in the heading would be above one of them
+   and a tooltip on a bar would not exist in the other. */
+.chart-footnote { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 12px; line-height: 1.5; }
 .mini-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .mini-table th, .mini-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
 .mini-table thead th { color: var(--ink); background: var(--surface-raised); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
