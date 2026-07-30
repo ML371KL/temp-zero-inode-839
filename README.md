@@ -33,10 +33,15 @@ Before the first private-pipeline run, the page displays a setup message because
 
 ## GitHub Pages
 
-The included workflow deploys the repository on every push to `main`, and also on
-every push to the `payload` branch — the branch the private pipeline force-pushes
-`data/portfolio.enc` to when it publishes a new encrypted snapshot. In repository
-settings, Pages must use **GitHub Actions** as its source. The public URL is normally:
+The included workflow deploys after the browser checks pass. A push to `main` starts
+"Frontend checks"; the deployment runs on its completion and only if it succeeded,
+against the exact commit that was checked. A push to the `payload` branch — the branch
+the private pipeline force-pushes `data/portfolio.enc` to every time it publishes —
+deploys immediately, because publication must never wait on a browser, but it takes the
+site code from the last commit of `main` the checks passed on rather than from its tip.
+Otherwise the next publication would put a rejected commit live half an hour after the
+checks rejected it. In repository settings, Pages must use **GitHub Actions** as its
+source. The public URL is normally:
 
 `https://<owner>.github.io/temp-zero-inode-839/`
 

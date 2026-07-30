@@ -485,6 +485,120 @@ async function checkScopeReachable(ctx) {
   );
 }
 
+/**
+ * The three deliverables of this wave that nothing else here touches.
+ *
+ * Forgetting the device must lock even when the key store refuses, because that is the
+ * half of the action that protects anything. Locking during a failing refresh must not
+ * write into the cleared screen. And the tabs must answer the keyboard, since a
+ * tablist that only responds to a mouse tells a screen reader nothing. Each of these
+ * was fixed in this wave and each would have regressed unseen.
+ */
+async function checkFrontendGuarantees(ctx) {
+  const session = await openPage(ctx.browser);
+  const failures = [];
+  try {
+    const { page } = session;
+
+    // 1. Forget-device with a key store that rejects.
+    await goto(page, ctx.site.origin);
+    await page.evaluate(() => {
+      const open = indexedDB.open.bind(indexedDB);
+      indexedDB.open = (...args) => {
+        const request = open(...args);
+        setTimeout(() => {
+          const error = new Error("denied by the probe");
+          Object.defineProperty(request, "error", { value: error, configurable: true });
+          request.onerror?.({ target: request });
+        }, 0);
+        return request;
+      };
+    });
+    await unlock(page, ctx.password);
+    await page.click("#forgetDevice");
+    await sleep(SETTLE_MS);
+    const afterForget = await page.evaluate(() => ({
+      locked: document.getElementById("dashboardView")?.hidden !== false,
+      body: document.body.innerText,
+    }));
+    if (!afterForget.locked) {
+      failures.push("«Забыть устройство» при отказе хранилища не заблокировало экран");
+    }
+    for (const row of (ctx.payload.rows || []).slice(0, 12)) {
+      const symbol = String(row.symbol || "");
+      if (symbol && afterForget.body.includes(symbol)) {
+        failures.push(`после «Забыть устройство» в DOM остался тикер ${symbol}`);
+        break;
+      }
+    }
+
+    // 2. Locking during a refresh that is going to fail.
+    await goto(page, ctx.site.origin);
+    await unlock(page, ctx.password);
+    await page.evaluate(() => {
+      window.fetch = () => new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("probe: network down")), 900);
+      });
+    });
+    await page.click("#refreshButton");
+    await sleep(150);
+    await page.evaluate(() => document.getElementById("lockButton").click());
+    await sleep(1600);
+    const afterRace = await page.evaluate(() => ({
+      locked: document.getElementById("dashboardView")?.hidden !== false,
+      feedback: document.getElementById("refreshFeedback")?.textContent || "",
+      label: document.getElementById("refreshButtonLabel")?.textContent || "",
+    }));
+    if (!afterRace.locked) failures.push("блокировка во время падающего обновления не удержалась");
+    if (afterRace.feedback.trim()) {
+      failures.push(`падающее обновление написало в заблокированный экран: «${afterRace.feedback}»`);
+    }
+    if (afterRace.label.trim() && afterRace.label.trim() !== "Обновить") {
+      failures.push(`метка кнопки обновления после блокировки: «${afterRace.label}»`);
+    }
+
+    // 3. The tabs answer the keyboard and say which one is chosen.
+    await goto(page, ctx.site.origin);
+    await unlock(page, ctx.password);
+    const tabs = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll("#quickTabs button")];
+      return {
+        count: buttons.length,
+        roles: buttons.map((b) => b.getAttribute("role")),
+        selected: buttons.filter((b) => b.getAttribute("aria-selected") === "true").length,
+        tabindexes: buttons.map((b) => b.getAttribute("tabindex")),
+      };
+    });
+    if (tabs.count < 2) failures.push("вкладок меньше двух — проверять нечего");
+    if (tabs.roles.some((role) => role !== "tab")) failures.push("не у всех вкладок role=tab");
+    if (tabs.selected !== 1) failures.push(`aria-selected=true у ${tabs.selected} вкладок вместо одной`);
+    if (tabs.tabindexes.filter((t) => t === "0").length !== 1) {
+      failures.push("roving tabindex не выставлен: не ровно одна вкладка достижима табуляцией");
+    }
+    await page.focus("#quickTabs button[tabindex='0']");
+    await page.keyboard.press("ArrowRight");
+    await sleep(SETTLE_MS);
+    const moved = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll("#quickTabs button")];
+      const active = document.activeElement;
+      return {
+        onATab: buttons.includes(active),
+        selectedIsFocused: active?.getAttribute("aria-selected") === "true",
+      };
+    });
+    if (!moved.onATab) failures.push("стрелка вправо не перевела фокус на соседнюю вкладку");
+    if (!moved.selectedIsFocused) failures.push("после стрелки выбранная вкладка не совпадает с фокусом");
+  } finally {
+    failures.push(...consoleFailures(session));
+    await session.close();
+  }
+  ctx.report.record(
+    "forget-device, the lock/refresh race and the tab keyboard all hold",
+    failures,
+    failures.length ? "" : "3 guarantees",
+  );
+}
+
 async function checkScopeConsistency(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1010,6 +1124,7 @@ async function main() {
     await checkLockLeavesNothing(ctx);
     await checkScopeConsistency(ctx);
     await checkScopeReachable(ctx);
+    await checkFrontendGuarantees(ctx);
     await checkSchemaAndFailures(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);

@@ -14,3 +14,9 @@ data/portfolio.enc
 # synthetic payload. It is invented data and harmless, but there is no reason for a
 # generated file to be committed beside the generator that makes it.
 .github/checks/fixtures/*.json
+
+# Python leaves these beside the fixture generator, and a .pyc embeds the absolute
+# path it was compiled from — on this machine that is the owner's Windows user
+# directory. In a public repository that is a small, permanent leak for no benefit.
+__pycache__/
+*.pyc
