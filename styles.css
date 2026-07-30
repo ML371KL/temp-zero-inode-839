@@ -278,9 +278,11 @@ button { color: inherit; }
    This is the only tertiary text on the page painted straight onto the page background,
    and the two blurred ambient blobs pass under it: measured across five viewports the
    darkest pixel behind this line is #c3dce3 in light and #122e39 in dark, which drags
-   --ink-3 down to 3.48 and 4.04. No darkening of --ink-3 rescues it — even with the
-   blobs at a third of their opacity it lands at 4.38 — so the line takes --ink-2
-   instead: 4.63 worst in light, 6.45 in dark. */
+   --ink-3 down to 3.95 and 4.04. (3.48 was the light figure for the previous --ink-3,
+   #5d7285, which this same wave darkened to #57697b; the conclusion is unchanged but
+   the number a future reader would re-derive from was the old one.) No darkening of
+   --ink-3 rescues it — even with the blobs at a third of their opacity it lands at
+   4.38 — so the line takes --ink-2 instead: 4.63 worst in light, 6.45 in dark. */
 .security-note { display: inline-flex; gap: 10px; align-items: center; margin-top: 28px; color: var(--ink-2); font: 400 11px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
 .security-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
 
