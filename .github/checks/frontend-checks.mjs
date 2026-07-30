@@ -476,6 +476,12 @@ async function checkScopeReachable(ctx) {
       }
     }
   } finally {
+    // The one scenario that was not collecting these, while the README said every
+    // scenario does. It is also the scenario that most needs them: ten widths, ten
+    // menu interactions and ten chart redraws, so a handler that throws on one
+    // breakpoint shows up here and nowhere else — and a thrown handler still leaves
+    // the menu clickable, which is all the assertions above look at.
+    failures.push(...consoleFailures(session));
     await session.close();
   }
   ctx.report.record(
@@ -519,7 +525,11 @@ async function checkFrontendGuarantees(ctx) {
     await sleep(SETTLE_MS);
     const afterForget = await page.evaluate(() => ({
       locked: document.getElementById("dashboardView")?.hidden !== false,
-      body: document.body.innerText,
+      // `textContent`, for the reason spelled out above `readableText`: `innerText`
+      // does not read hidden subtrees, and locking works by hiding `#dashboardView`.
+      // So the residue loop below, written to catch a ticker left behind, could never
+      // see one — it was asserting against a string that is empty by construction.
+      body: document.documentElement.textContent,
     }));
     if (!afterForget.locked) {
       failures.push("«Забыть устройство» при отказе хранилища не заблокировало экран");
@@ -575,19 +585,46 @@ async function checkFrontendGuarantees(ctx) {
     if (tabs.tabindexes.filter((t) => t === "0").length !== 1) {
       failures.push("roving tabindex не выставлен: не ровно одна вкладка достижима табуляцией");
     }
-    await page.focus("#quickTabs button[tabindex='0']");
+    // Which tab we start on has to be recorded, because both assertions below used to
+    // hold when ArrowRight did nothing at all: focus stayed on the tab it was put on,
+    // which is a tab and is the selected one. A keyboard test that passes on a page
+    // with no key handler tests nothing. What it has to say is that focus *moved*, and
+    // moved to the next tab in the list rather than anywhere.
+    const startIndex = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll("#quickTabs button")];
+      const start = document.querySelector("#quickTabs button[tabindex='0']");
+      start.focus();
+      return buttons.indexOf(start);
+    });
     await page.keyboard.press("ArrowRight");
     await sleep(SETTLE_MS);
     const moved = await page.evaluate(() => {
       const buttons = [...document.querySelectorAll("#quickTabs button")];
       const active = document.activeElement;
       return {
-        onATab: buttons.includes(active),
+        index: buttons.indexOf(active),
+        count: buttons.length,
         selectedIsFocused: active?.getAttribute("aria-selected") === "true",
+        selectedCount: buttons.filter(
+          (b) => b.getAttribute("aria-selected") === "true"
+        ).length,
+        rovingOnFocused: active?.getAttribute("tabindex") === "0",
       };
     });
-    if (!moved.onATab) failures.push("стрелка вправо не перевела фокус на соседнюю вкладку");
+    const expected = (startIndex + 1) % moved.count;
+    if (moved.index !== expected) {
+      failures.push(
+        `стрелка вправо: фокус на вкладке ${moved.index} вместо ${expected}` +
+          ` (стартовали с ${startIndex})`
+      );
+    }
     if (!moved.selectedIsFocused) failures.push("после стрелки выбранная вкладка не совпадает с фокусом");
+    if (moved.selectedCount !== 1) {
+      failures.push(`после стрелки aria-selected=true у ${moved.selectedCount} вкладок вместо одной`);
+    }
+    // The roving tabindex has to travel with the focus, or a second Tab press leaves
+    // the tablist entirely from a tab the user never chose.
+    if (!moved.rovingOnFocused) failures.push("после стрелки tabindex=0 остался не на сфокусированной вкладке");
   } finally {
     failures.push(...consoleFailures(session));
     await session.close();
