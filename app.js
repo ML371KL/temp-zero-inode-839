@@ -3184,6 +3184,21 @@ function issueNumbers(issue) {
   }
   if (issue.count != null) parts.push(`${issue.count} ${ISSUE_COUNT_UNITS[issue.type] || "позиц."}`);
   if (issue.ageHours != null) parts.push(`возраст ${formatNumber(issue.ageHours, 1)} ч`);
+  // Computed here rather than taken from the message, because the panel prefers a
+  // static explanation and drops `issue.message` whenever one exists — so a duration
+  // written into the message would never reach the page. Reading the clock here also
+  // keeps it right for as long as the page is open.
+  if (issue.unavailableSince) {
+    const began = timeValue(issue.unavailableSince);
+    if (began !== null) {
+      const hours = (Date.now() - began) / 3_600_000;
+      if (hours >= 0) {
+        parts.push(hours >= 48
+          ? `тянется ${formatNumber(hours / 24, 1)} сут`
+          : `тянется ${formatNumber(hours, 0)} ч`);
+      }
+    }
+  }
   if (issue.aheadHours != null) parts.push(`вперёд на ${formatNumber(issue.aheadHours, 1)} ч`);
   return parts.join(" · ");
 }
