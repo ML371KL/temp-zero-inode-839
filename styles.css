@@ -1113,12 +1113,22 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .table-wrap td .live-price.live-down { color: var(--negative); }
 .table-wrap td .live-price.live-flat { color: var(--ink-3); }
 
-/* Процент движения цены с момента выхода. Внутри `.detail-item strong`, поэтому
-   кегль наследуется от плашки — размеры карточек в гриде остаются одинаковыми. */
-.exit-drift {
-  margin-left: 6px;
-  font-size: 0.86em;
-  font-variant-numeric: tabular-nums;
+/* Процент движения цены с момента выхода — справа от самой цены, на одной строке.
+   Селектор с `strong` обязателен, и не ради специфичности: правило
+   `.detail-item span { display: block }` выше ловит и этот вложенный span, делает
+   его блоком, и процент уезжает под цену, занимая нижнюю строку карточки. Из-за
+   этого же ломалось выравнивание — `justify-content: space-between` прижимает к низу
+   последний элемент, и им оказывался процент, а не цена. Заодно сбрасываем стиль
+   подписи, который тот же селектор навязывает: uppercase и разрядка на числе. */
+.detail-item strong .exit-drift {
+  display: inline;
+  margin-left: 8px;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 0.88em;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
 }
 .detail-item strong .exit-drift.positive { color: var(--positive); }
 .detail-item strong .exit-drift.negative { color: var(--negative); }

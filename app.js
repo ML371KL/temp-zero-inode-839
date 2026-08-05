@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260805-2";
+} from "./charts.js?v=20260805-3";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -79,6 +79,9 @@ const state = {
   // все денежные итоги на странице посчитаны по ценам снимка, и подмена цены в
   // строке развалила бы проверку «итоги равны сумме строк», которая эти итоги и
   // стережёт. Живая цена показывается рядом, а не вместо.
+  // Payload в том виде, в каком его опубликовал пайплайн. `state.payload` — он же
+  // с подставленными живыми числами; каждое перекрытие считается от снимка.
+  snapshot: null,
   liveQuotes: null,
   liveKey: null,
   liveError: null,
@@ -136,6 +139,56 @@ async function fetchLiveQuotes(descriptor, key) {
   return JSON.parse(new TextDecoder().decode(body));
 }
 
+/**
+ * Перекрытие: денежные числа, пересчитанные сервером по живым ценам.
+ *
+ * Страница ничего не вычисляет. Числа приходят готовыми, посчитанными той же
+ * функцией, которой собран payload, на том же журнале и той же сверке — отличается
+ * только таблица котировок. Поэтому проверка «итоги равны сумме строк» сохраняет
+ * смысл: она проверяет живые числа ровно так же, как числа снимка.
+ *
+ * Привязка обязательна. Перекрытие несёт отпечаток payload, для которого посчитано,
+ * и если пайплайн уже опубликовал новый, применить старое перекрытие значило бы
+ * показать смесь двух прогонов — часть строк из одного, часть из другого, и итог,
+ * не равный ни тому ни другому. Тогда его не применяем вовсе: снимок целиком верен.
+ */
+function overlayForPayload(payload) {
+  const overlay = state.liveQuotes?.overlay;
+  if (!overlay || !payload) return null;
+  const age = liveSnapshotAgeMs();
+  if (age === null || age > LIVE_QUOTES_MAX_AGE_MS) return null;
+  if (String(overlay.basedOn?.generatedAt || "") !== String(payload.generatedAt || "")) {
+    return null;
+  }
+  return overlay;
+}
+
+/**
+ * payload с подставленными живыми числами — новый объект, исходный не трогаем.
+ *
+ * Мутировать `state.payload` было бы дешевле и неверно: перекрытие приходит каждые
+ * несколько секунд и каждое следующее считается от снимка, а не от предыдущего
+ * результата. Затерев снимок один раз, дальше пришлось бы накладывать поправку на
+ * поправку — и первая же пропущенная выгрузка оставила бы страницу с числами,
+ * которые не сходятся ни с чем.
+ */
+function payloadWithLive(payload) {
+  const overlay = overlayForPayload(payload);
+  if (!overlay) return payload;
+  const rows = overlay.rows || {};
+  const totals = overlay.totals || {};
+  if (!Object.keys(rows).length && !Object.keys(totals).length) return payload;
+  return {
+    ...payload,
+    rows: (payload.rows || []).map((row) => {
+      const patch = rows[String(row.rowId ?? "")];
+      return patch ? { ...row, ...patch } : row;
+    }),
+    totals: { ...payload.totals, ...totals },
+    ...(overlay.allocation ? { allocation: overlay.allocation } : {}),
+  };
+}
+
 /** Живая котировка строки, если она есть и ещё не протухла. */
 function liveQuoteFor(row) {
   const quotes = state.liveQuotes?.quotes;
@@ -167,12 +220,14 @@ async function refreshLiveQuotes() {
     state.liveError = error?.message || String(error);
   }
   if (!state.cryptoKey) return;
-  renderLiveNote();
-  renderRows();
+  // Перерисовываем целиком, а не только строки: перекрытие двигает и шапку, и
+  // аллокацию, и сверку итогов, и рисовать их из разных перекрытий нельзя.
+  renderDashboard(state.snapshot || state.payload);
 }
 
 function startLiveQuotes() {
   stopLiveQuotes();
+  state.snapshot = null;
   if (!state.payload?.liveQuotes?.url) return;
   refreshLiveQuotes();
   state.liveTimer = window.setInterval(refreshLiveQuotes, LIVE_QUOTES_REFRESH_MS);
@@ -2482,7 +2537,12 @@ function renderLiveNote() {
   const values = Object.values(quotes);
   const delayed = values.filter((quote) => Number(quote?.delayedByMinutes) > 0).length;
   const derived = values.filter((quote) => quote?.derivedFrom).length;
-  const parts = [`живые цены: ${values.length}`];
+  // Главное в этой строке — действует ли пересчёт. Живые цены без него означают
+  // совсем другое: деньги на странице всё ещё от снимка.
+  const applied = Boolean(overlayForPayload(state.snapshot));
+  const parts = [applied
+    ? `живые цены: ${values.length}, деньги пересчитаны`
+    : `живые цены: ${values.length}, деньги из снимка`];
   // Отложенные и выведенные считаются отдельно, потому что это разные вещи и обе
   // надо назвать: первая — цена биржи, которую та придерживает, вторая — цена,
   // которой на этой площадке вообще не печатали.
@@ -3149,59 +3209,21 @@ function magnitudeBar(value, max, tone) {
 }
 
 /**
- * Живая цена под ценой снимка — второй строкой, а не вместо неё.
+ * Цена, которую показывает строка, — одна.
  *
- * Заменить число было бы честнее на вид и неверно по существу: рыночная стоимость,
- * нереализованный P&L и все итоги в шапке посчитаны пайплайном по цене снимка, и
- * строка, где цена живая, а деньги рядом — от снимка, противоречит сама себе.
- * Пересчитывать их в браузере — отдельное решение, которое владелец сознательно
- * отложил; до тех пор живая цена стоит рядом и подписана.
+ * Живая берётся только тогда, когда действует перекрытие: деньги в этой же строке
+ * пересчитаны сервером именно по ней. Без перекрытия живая цена рядом со стоимостью
+ * из снимка — это строка, противоречащая себе, и тогда честнее показать цену снимка,
+ * от которой посчитано всё остальное.
  */
-function liveCellHtml(row, snapshotQuote) {
+function displayQuote(row) {
+  if (!overlayForPayload(state.snapshot)) return row.currentPrice || {};
   const live = liveQuoteFor(row);
-  if (!live || live.price == null) return "";
-  const age = liveSnapshotAgeMs();
-  if (age === null || age > LIVE_QUOTES_MAX_AGE_MS) return "";
-
-  const currency = live.currency || row.currency;
-  const shown = formatMoney(live.price, currency, true);
-  const previous = numberValue(snapshotQuote?.price);
-  const now = numberValue(live.price);
-  // Смысл живой цены — в том, насколько она разошлась со снимком, а не в самой
-  // цифре: снимок владелец уже видит строкой выше.
-  const drift = previous && now !== null && previous !== 0
-    ? ((now - previous) / previous) * 100
-    : null;
-  const driftText = drift === null
-    ? ""
-    : ` ${drift > 0 ? "+" : ""}${formatNumber(drift, 2)} %`;
-  const tone = drift === null || Math.abs(drift) < 0.005
-    ? "flat"
-    : (drift > 0 ? "up" : "down");
-
-  const delayed = Number(live.delayedByMinutes) > 0;
-  const marks = [];
-  if (live.derivedFrom) {
-    const from = live.derivedFrom;
-    marks.push(`выведено из ${from.usSymbol || "листинга США"}`);
-  }
-  if (delayed) marks.push(`биржа отдаёт с задержкой ${live.delayedByMinutes} мин`);
-  const title = [
-    `живая цена ${shown}`,
-    live.source ? `источник: ${live.source}` : null,
-    live.marketTime ? `время рынка: ${formatDate(live.marketTime, true)}` : null,
-    ...marks,
-  ].filter(Boolean).join(" · ");
-
-  return `<span class="live-price live-${tone} ${delayed ? "live-delayed" : ""}" title="${escapeHtml(title)}">`
-    + `${escapeHtml(shown)}${escapeHtml(driftText)}`
-    + `${live.derivedFrom ? '<span class="live-flag" aria-hidden="true">≈</span>' : ""}`
-    + `${delayed ? '<span class="live-flag" aria-hidden="true">⏱</span>' : ""}`
-    + `</span>`;
+  return live || row.currentPrice || {};
 }
 
 function rowHtml(row, scale) {
-  const quote = row.currentPrice || {};
+  const quote = displayQuote(row);
   // Priced in the currency the quote itself is denominated in, not the instrument's:
   // if those ever disagree the label must not hide it.
   const price = quote.price == null
@@ -3213,6 +3235,11 @@ function rowHtml(row, scale) {
   const priceMeta = [
     quote.type && quote.type !== "LAST" ? quote.type : null,
     quote.marketTime ? formatDateShort(quote.marketTime, "time").replace(", ", " ") : null,
+    // Задержка биржи называется словами, а не прячется в оттенок: цена Торонто
+    // приходит с текущей меткой времени и отстаёт на пятнадцать минут, и это
+    // единственное место, где страница может об этом сказать.
+    Number(quote.delayedByMinutes) > 0 ? `задержка ${quote.delayedByMinutes} мин` : null,
+    quote.derivedFrom ? `выведено из ${quote.derivedFrom.usSymbol || "США"}` : null,
     FRESHNESS_LABELS[String(quote.freshness || "").toLowerCase()],
   ].filter(Boolean).join(" · ");
   const open = isOpenNow(row);
@@ -3236,7 +3263,7 @@ function rowHtml(row, scale) {
       <td class="numeric quantity-cell">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
       <td class="numeric">${open && row.openNow === undefined ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
-      <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span>${liveCellHtml(row, quote)}</td>
+      <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
       <td class="numeric">${formatUsdCell(row.marketValueUsd)}${magnitudeBar(row.marketValueUsd, scale.marketValue, "neutral")}</td>
       <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatUsdCell(row.unrealizedPnlUsd)}</td>
       <td class="numeric ${pnlClass(row.realizedPnlUsd)}">${formatUsdCell(row.realizedPnlUsd)}</td>
@@ -3541,7 +3568,10 @@ function renderIssues(payload) {
 /* ------------------------------------------------------------- lifecycle --- */
 
 function renderDashboard(payload) {
-  state.payload = payload;
+  // Снимок в исходном виде — то, от чего считается каждое следующее перекрытие.
+  state.snapshot = payload;
+  state.payload = payloadWithLive(payload);
+  payload = state.payload;
   // Before anything reads a row: every summary in the page is filtered through this.
   state.quarantined = quarantinedConids(payload);
   scopeCache = null;
@@ -3568,9 +3598,6 @@ function renderDashboard(payload) {
   renderRows();
   renderIssues(payload);
   renderLiveNote();
-  // Последним: слой поверх уже нарисованной страницы, и его отсутствие ничего
-  // из перечисленного выше не задерживает.
-  startLiveQuotes();
 }
 
 function showDashboard(payload, key) {
@@ -3582,6 +3609,10 @@ function showDashboard(payload, key) {
   byId("lockButton").hidden = false;
   byId("refreshButton").hidden = false;
   renderDashboard(payload);
+  // Запускается ЗДЕСЬ, а не внутри renderDashboard: тик перекрытия перерисовывает
+  // страницу целиком, и таймер, заведённый в отрисовке, перезапускал бы сам себя
+  // на каждом тике — то есть отрисовка вызывала бы отрисовку без конца.
+  startLiveQuotes();
 }
 
 const CLEARED_ON_LOCK = [
