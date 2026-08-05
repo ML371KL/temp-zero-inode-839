@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260805-4";
+} from "./charts.js?v=20260805-5";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -271,11 +271,20 @@ async function saveAlertRules(rules) {
     "raw", bytesFromBase64(descriptor.key), { name: "AES-GCM" }, false, ["encrypt"],
   );
   const envelope = await encryptAlertRules(rules, state.alertKey);
-  const response = await fetch(url, {
-    method: "PUT",
-    body: JSON.stringify(envelope),
-  });
-  if (!response.ok) throw new Error(`сервер отказал (${response.status})`);
+  let response;
+  try {
+    response = await fetch(url, { method: "PUT", body: JSON.stringify(envelope) });
+  } catch (error) {
+    // fetch падает с "Failed to fetch" на всём, что случилось до ответа, и чаще
+    // всего это отбитый предзапрос CORS: PUT — не простой метод, браузер сначала
+    // спрашивает OPTIONS, и хранилище обязано разрешить PUT с этого адреса. Само
+    // сообщение браузера про это не говорит ни слова, поэтому говорим мы.
+    throw new Error(
+      "хранилище не приняло запрос — в правилах CORS бакета должен быть разрешён "
+      + "метод PUT с адреса дашборда",
+    );
+  }
+  if (!response.ok) throw new Error(`хранилище отказало (${response.status})`);
 }
 
 /** Живая котировка строки, если она есть и ещё не протухла. */
@@ -3062,6 +3071,51 @@ function breakEvenMarkup(row) {
  * вместо двух. Подписи зависят от направления позиции — шорту закрывающая сделка
  * это откуп, и назвать её продажей значило бы назвать не ту сделку.
  */
+/**
+ * Число из того, что человек действительно набирает.
+ *
+ * `replace(",", ".")` меняет ТОЛЬКО первую запятую, поэтому «1 234,56» превращалось
+ * в «1 234.56» с пробелом и давало NaN, а «1,234,56» — в «1.234,56». Здесь: пробелы
+ * (включая неразрывный, который приезжает вставкой из самой страницы) выбрасываются,
+ * а разделителем считается ПОСЛЕДНИЙ знак — остальные это разряды. Так «1,234.56» и
+ * «1 234,56» дают одно и то же, и обе привычки работают.
+ */
+function parseDecimalInput(raw) {
+  const cleaned = String(raw ?? "").replace(/[\s\u00a0\u202f]/g, "");
+  if (!cleaned) return null;
+  const lastSeparator = Math.max(cleaned.lastIndexOf(","), cleaned.lastIndexOf("."));
+  const normalized = lastSeparator === -1
+    ? cleaned
+    : cleaned.slice(0, lastSeparator).replace(/[.,]/g, "") + "." + cleaned.slice(lastSeparator + 1);
+  if (!/^-?\d*\.?\d*$/.test(normalized)) return null;
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Дата в том виде, в каком её пишут здесь: ДД-ММ-ГГГГ.
+ *
+ * Хранится и проверяется на сервере она в ISO, и переводится ровно на границе —
+ * ввод разбирается сюда, вывод форматируется отсюда. Держать в состоянии местный
+ * формат значило бы гонять его через шифрование и сверку, где он ничей.
+ */
+function parseLocalDate(raw) {
+  const match = /^(\d{2})[-./](\d{2})[-./](\d{4})$/.exec(String(raw ?? "").trim());
+  if (!match) return null;
+  const [, day, month, year] = match;
+  const iso = `${year}-${month}-${day}`;
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  // Отсеивает 31-02-2026: Date такое молча переносит на март.
+  if (parsed.toISOString().slice(0, 10) !== iso) return null;
+  return iso;
+}
+
+function formatLocalDate(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso ?? ""));
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : String(iso ?? "");
+}
+
 function alertsPanelMarkup(row) {
   const conid = String(row.conid ?? "");
   const short = String(row.direction || "").toUpperCase() === "SHORT";
@@ -3075,7 +3129,7 @@ function alertsPanelMarkup(row) {
   const kinds = [
     ["BUY_BELOW", short ? "Откупить" : "Купить", "цена опустится до"],
     ["SELL_ABOVE", short ? "Нарастить" : "Продать", "цена поднимется до"],
-    ["DATE", "Дата", "наступит день"],
+    ["DATE", "Дата", "наступит день (ДД-ММ-ГГГГ)"],
   ];
   const chips = rules.map((rule) => alertChipMarkup(rule)).join("");
 
@@ -3126,7 +3180,7 @@ function alertChipMarkup(rule) {
   else if (blocked) { tone = "is-blocked"; note = `ждёт живой цены (${blocked})`; }
 
   const what = rule.kind === "DATE"
-    ? formatDateShort(rule.date)
+    ? formatLocalDate(rule.date)
     : `${rule.kind === "BUY_BELOW" ? "≤" : "≥"} ${escapeHtml(rule.price)}`;
   const label = rule.kind === "DATE" ? "дата" : (rule.kind === "BUY_BELOW" ? "покупка" : "продажа");
 
@@ -4256,11 +4310,12 @@ function validateEntry(panel) {
   let problem = "";
   if (!raw) problem = "";
   else if (kind === "DATE") {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) problem = "дата в формате ГГГГ-ММ-ДД";
-    else if (raw < new Date().toISOString().slice(0, 10)) problem = "дата в прошлом";
+    const iso = parseLocalDate(raw);
+    if (!iso) problem = "дата в формате ДД-ММ-ГГГГ";
+    else if (iso < new Date().toISOString().slice(0, 10)) problem = "дата в прошлом";
   } else {
-    const value = Number(raw.replace(",", "."));
-    if (!Number.isFinite(value)) problem = "нужно число";
+    const value = parseDecimalInput(raw);
+    if (value === null) problem = "нужно число";
     else if (value <= 0) problem = "цена больше нуля";
   }
   const ready = Boolean(raw) && !problem && !alertsSection()?.writeUrl === false;
@@ -4305,7 +4360,7 @@ byId("portfolioBody").addEventListener("click", async (event) => {
     panel.querySelector(".alerts-hint").textContent = kindButton.dataset.alertHint;
     // Предзаполнение снимает большую часть набора: обычно правят одну цифру.
     input.value = kindButton.dataset.alertKind === "DATE"
-      ? new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10)
+      ? formatLocalDate(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10))
       : input.dataset.alertCurrentPrice || input.value;
     input.setAttribute("inputmode", kindButton.dataset.alertKind === "DATE" ? "numeric" : "decimal");
     validateEntry(panel);
@@ -4329,8 +4384,8 @@ byId("portfolioBody").addEventListener("click", async (event) => {
     const conid = panel.dataset.alertConid;
     const raw = input.value.trim();
     const rule = kind === "DATE"
-      ? { conid, kind, date: raw }
-      : { conid, kind, price: String(Number(raw.replace(",", "."))) };
+      ? { conid, kind, date: parseLocalDate(raw) }
+      : { conid, kind, price: String(parseDecimalInput(raw)) };
     // Идентификатор считает сервер, но он нужен здесь и сейчас, чтобы чип можно
     // было нарисовать и удалить до того, как ответ вернётся.
     rule.id = `local-${conid}-${kind}-${rule.price || rule.date}`;
