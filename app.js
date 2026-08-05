@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260805-3";
+} from "./charts.js?v=20260805-4";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -84,6 +84,11 @@ const state = {
   snapshot: null,
   liveQuotes: null,
   liveKey: null,
+  // Правила алертов, как их видит сервер. Ключ на запись отдельный: тот, что
+  // расшифровывает котировки, WebCrypto шифровать не даст.
+  alertRules: [],
+  alertKey: null,
+  alertError: null,
   liveError: null,
   liveTimer: null,
 };
@@ -189,6 +194,90 @@ function payloadWithLive(payload) {
   };
 }
 
+/* ---------------------------------------------------------------- alerts --- */
+
+/*
+ * Правила алертов владелец задаёт здесь, а срабатывают они на сервере — в этом весь
+ * смысл: уведомление должно приходить с закрытым браузером. Страница поэтому не
+ * хранит состояние алертов, она его отображает: правила уезжают в объект, состояние
+ * приезжает обратно вместе с котировками, и единственный источник правды — сервер.
+ *
+ * Ссылка на запись подписана сервером и лежит внутри зашифрованного объекта, то есть
+ * доступна только тому, кто уже открыл payload паролем. Ключей R2 на странице нет.
+ */
+
+const ALERT_AAD = "temp-zero-inode-839:alerts:v1";
+const ALERT_KINDS = ["BUY_BELOW", "SELL_ABOVE", "DATE"];
+
+function alertsSection() {
+  return state.liveQuotes?.alerts || null;
+}
+
+/** Правила, как их видит сервер, плюс несохранённые местные изменения. */
+function alertRules() {
+  return state.alertRules || [];
+}
+
+function alertStateFor(id) {
+  return alertsSection()?.state?.[id] || null;
+}
+
+async function encryptAlertRules(rules, key) {
+  const body = JSON.stringify({ schemaVersion: 1, rules });
+  const bytes = new TextEncoder().encode(body);
+  const gz = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+  const compressed = new Uint8Array(await new Response(gz).arrayBuffer());
+  const aad = new TextEncoder().encode(ALERT_AAD);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad, tagLength: 128 },
+    key,
+    compressed,
+  ));
+  return {
+    format: "ibkr-alerts-aes-gcm",
+    version: 1,
+    cipher: {
+      name: "AES-GCM",
+      iv: base64FromBytes(iv),
+      aad: base64FromBytes(aad),
+    },
+    compression: "gzip",
+    ciphertext: base64FromBytes(ciphertext),
+  };
+}
+
+function base64FromBytes(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/**
+ * Записать правила. Ключ шифрования — тот же, что у котировок, домен другой.
+ *
+ * Оптимистично: список на экране меняется сразу, а состояние строки говорит, доехало
+ * ли. Ждать ответа перед отрисовкой значило бы держать интерфейс замороженным на
+ * время сетевого запроса ради изменения, которое почти всегда проходит.
+ */
+async function saveAlertRules(rules) {
+  const url = alertsSection()?.writeUrl;
+  if (!url) throw new Error("сервер не выдал ссылку для записи");
+  const descriptor = state.payload?.liveQuotes;
+  if (!descriptor?.key) throw new Error("нет ключа");
+  // Свой ключ на запись: тот, что в state.liveKey, импортирован только на
+  // расшифровку, и WebCrypto не даст им зашифровать.
+  state.alertKey = state.alertKey || await crypto.subtle.importKey(
+    "raw", bytesFromBase64(descriptor.key), { name: "AES-GCM" }, false, ["encrypt"],
+  );
+  const envelope = await encryptAlertRules(rules, state.alertKey);
+  const response = await fetch(url, {
+    method: "PUT",
+    body: JSON.stringify(envelope),
+  });
+  if (!response.ok) throw new Error(`сервер отказал (${response.status})`);
+}
+
 /** Живая котировка строки, если она есть и ещё не протухла. */
 function liveQuoteFor(row) {
   const quotes = state.liveQuotes?.quotes;
@@ -213,6 +302,12 @@ async function refreshLiveQuotes() {
     if (!state.cryptoKey) return;
     state.liveQuotes = snapshot;
     state.liveError = null;
+    // Правила берутся от сервера — он источник правды, а не то, что браузер думает,
+    // что записал. Пока висит несохранённое изменение, местный список сохраняется:
+    // иначе ответ сервера, отставший на один тик, стёр бы только что добавленный чип.
+    if (!alertRules().some((rule) => rule._pending || rule._failed)) {
+      state.alertRules = snapshot.alerts?.rules || [];
+    }
   } catch (error) {
     // Живой слой не обязателен: страница осталась ровно тем, чем была до него.
     // Поэтому ошибка гасит слой и печатается строкой, а не всплывает наверх.
@@ -240,6 +335,9 @@ function stopLiveQuotes() {
   }
   state.liveQuotes = null;
   state.liveKey = null;
+  state.alertKey = null;
+  state.alertRules = [];
+  state.alertError = null;
   state.liveError = null;
 }
 
@@ -2955,11 +3053,102 @@ function breakEvenMarkup(row) {
  * half-typed prices in memory, notified nobody and pretended otherwise; native IBKR
  * alerts do the actual job, so the card now just says so.
  */
+/**
+ * Панель алертов — единственный ввод на странице, где всё остальное вывод.
+ *
+ * Поэтому она и выглядит иначе: карточка-с-полями рядом с карточками-с-числами, в
+ * которые начнут тыкать как в неё, если их не различить. Тип — сегментированный
+ * переключатель, а не список: вариантов три, они всё время на виду, и клик один
+ * вместо двух. Подписи зависят от направления позиции — шорту закрывающая сделка
+ * это откуп, и назвать её продажей значило бы назвать не ту сделку.
+ */
+function alertsPanelMarkup(row) {
+  const conid = String(row.conid ?? "");
+  const short = String(row.direction || "").toUpperCase() === "SHORT";
+  const rules = alertRules().filter((rule) => String(rule.conid) === conid);
+  const quote = displayQuote(row);
+  const price = numberValue(quote.price);
+  const section = alertsSection();
+  const offline = !section?.writeUrl;
+  const failure = state.alertError?.conid === conid ? state.alertError.message : "";
+
+  const kinds = [
+    ["BUY_BELOW", short ? "Откупить" : "Купить", "цена опустится до"],
+    ["SELL_ABOVE", short ? "Нарастить" : "Продать", "цена поднимется до"],
+    ["DATE", "Дата", "наступит день"],
+  ];
+  const chips = rules.map((rule) => alertChipMarkup(rule)).join("");
+
+  return `
+    <div class="alerts-panel" data-alert-conid="${escapeHtml(conid)}">
+      <span class="alerts-title">Уведомить меня, когда…</span>
+      <div class="alerts-kinds" role="group" aria-label="Тип уведомления">
+        ${kinds.map(([kind, label, hint], index) => `
+          <button type="button" class="alerts-kind ${index === 0 ? "is-active" : ""}"
+            data-alert-kind="${kind}" data-alert-hint="${escapeHtml(hint)}"
+            aria-pressed="${index === 0}">${escapeHtml(label)}</button>`).join("")}
+      </div>
+      <div class="alerts-entry">
+        <label class="alerts-hint" for="alert-value-${escapeHtml(conid)}">${escapeHtml(kinds[0][2])}</label>
+        <div class="alerts-row">
+          <input id="alert-value-${escapeHtml(conid)}" class="alerts-input" type="text"
+            inputmode="decimal" autocomplete="off"
+            value="${price === null ? "" : escapeHtml(String(price))}"
+            data-alert-currency="${escapeHtml(quote.currency || row.currency || "")}" />
+          <button type="button" class="alerts-add" ${offline ? "disabled" : ""}>Добавить</button>
+        </div>
+        <p class="alerts-feedback ${failure ? "is-bad" : ""}" role="status">${escapeHtml(failure)}</p>
+      </div>
+      ${chips ? `<div class="alerts-chips">${chips}</div>` : ""}
+      ${offline
+        ? '<p class="alerts-offline">Сервер уведомлений недоступен — правила сейчас не сохранить.</p>'
+        : ""}
+    </div>
+  `;
+}
+
+/**
+ * Одно правило. Состояние честное и это важнее вида: алерт, который выглядит
+ * поставленным и не доехал, хуже отсутствующего.
+ */
+function alertChipMarkup(rule) {
+  const status = alertStateFor(rule.id);
+  const pending = rule._pending;
+  const failed = rule._failed;
+  const fired = status?.firedAt;
+  const blocked = status?.blockedBy;
+
+  let tone = "is-armed";
+  let note = "проверяется на сервере";
+  if (pending) { tone = "is-pending"; note = "сохраняется…"; }
+  else if (failed) { tone = "is-failed"; note = "не сохранён — повторить"; }
+  else if (fired) { tone = "is-fired"; note = `сработал ${formatDateShort(fired, "time")}`; }
+  else if (blocked) { tone = "is-blocked"; note = `ждёт живой цены (${blocked})`; }
+
+  const what = rule.kind === "DATE"
+    ? formatDateShort(rule.date)
+    : `${rule.kind === "BUY_BELOW" ? "≤" : "≥"} ${escapeHtml(rule.price)}`;
+  const label = rule.kind === "DATE" ? "дата" : (rule.kind === "BUY_BELOW" ? "покупка" : "продажа");
+
+  return `
+    <span class="alert-chip ${tone}" data-alert-id="${escapeHtml(rule.id)}" title="${escapeHtml(note)}">
+      <span class="alert-chip-what">${escapeHtml(label)} ${what}</span>
+      <span class="alert-chip-note">${escapeHtml(note)}</span>
+      <button type="button" class="alert-chip-remove" aria-label="Убрать уведомление">×</button>
+    </span>
+  `;
+}
+
+/**
+ * Ряд из двух карточек: слева ввод, справа число. Порядок не декоративный —
+ * читают слева направо, а безубыточность это ответ на вопрос, который задаёт
+ * панель слева: до какой цены имеет смысл ждать.
+ */
 function levelsMarkup(row) {
   return `
     <div class="levels-panel">
+      ${alertsPanelMarkup(row)}
       ${breakEvenMarkup(row)}
-      <p class="levels-note">Ценовые уровни удобнее ставить нативными алертами IBKR — они бесплатны и срабатывают, когда браузер закрыт.</p>
     </div>
   `;
 }
@@ -4034,3 +4223,135 @@ function observeChartHosts() {
 
 observeChartHosts();
 initialize();
+
+/* --------------------------------------------------------- alerts: события --- */
+
+/*
+ * Делегирование на таблице, а не обработчики на каждой карточке: раскрытая строка
+ * перерисовывается на каждом тике живого слоя, и обработчики, повешенные на её
+ * узлы, пришлось бы вешать заново двадцать раз в минуту — а половина из них
+ * пережила бы удаление своего узла.
+ */
+function alertPanelOf(node) {
+  return node.closest(".alerts-panel");
+}
+
+function activeKind(panel) {
+  return panel.querySelector(".alerts-kind.is-active")?.dataset.alertKind || "BUY_BELOW";
+}
+
+function setFeedback(panel, message, tone = "") {
+  const node = panel.querySelector(".alerts-feedback");
+  if (!node) return;
+  node.textContent = message;
+  node.className = `alerts-feedback ${tone}`;
+}
+
+/** Проверка по ходу: кнопка гаснет сразу и говорит почему, а не после нажатия. */
+function validateEntry(panel) {
+  const input = panel.querySelector(".alerts-input");
+  const add = panel.querySelector(".alerts-add");
+  const kind = activeKind(panel);
+  const raw = input.value.trim();
+  let problem = "";
+  if (!raw) problem = "";
+  else if (kind === "DATE") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) problem = "дата в формате ГГГГ-ММ-ДД";
+    else if (raw < new Date().toISOString().slice(0, 10)) problem = "дата в прошлом";
+  } else {
+    const value = Number(raw.replace(",", "."));
+    if (!Number.isFinite(value)) problem = "нужно число";
+    else if (value <= 0) problem = "цена больше нуля";
+  }
+  const ready = Boolean(raw) && !problem && !alertsSection()?.writeUrl === false;
+  add.disabled = !raw || Boolean(problem) || !alertsSection()?.writeUrl;
+  setFeedback(panel, problem, problem ? "is-bad" : "");
+  return ready;
+}
+
+async function commitRules(panel, rules, revert) {
+  state.alertRules = rules;
+  renderRows();
+  try {
+    await saveAlertRules(rules.map(({ _pending, _failed, ...rule }) => rule));
+    state.alertRules = rules.map(({ _pending, _failed, ...rule }) => rule);
+    state.alertError = null;
+  } catch (error) {
+    // Сообщение кладётся в состояние, а не в узел: строка сейчас будет
+    // перерисована, и текст, записанный в DOM, исчезнет вместе с ней. Первая
+    // редакция делала именно так, и отказ записи выглядел как её успех.
+    state.alertRules = revert();
+    state.alertError = {
+      conid: panel.dataset.alertConid,
+      message: error?.message || "не удалось сохранить",
+    };
+  }
+  if (state.cryptoKey) renderRows();
+}
+
+byId("portfolioBody").addEventListener("click", async (event) => {
+  const panel = alertPanelOf(event.target);
+  if (!panel) return;
+
+  const kindButton = event.target.closest(".alerts-kind");
+  if (kindButton) {
+    event.stopPropagation();
+    for (const button of panel.querySelectorAll(".alerts-kind")) {
+      const active = button === kindButton;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    const input = panel.querySelector(".alerts-input");
+    panel.querySelector(".alerts-hint").textContent = kindButton.dataset.alertHint;
+    // Предзаполнение снимает большую часть набора: обычно правят одну цифру.
+    input.value = kindButton.dataset.alertKind === "DATE"
+      ? new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10)
+      : input.dataset.alertCurrentPrice || input.value;
+    input.setAttribute("inputmode", kindButton.dataset.alertKind === "DATE" ? "numeric" : "decimal");
+    validateEntry(panel);
+    return;
+  }
+
+  const remove = event.target.closest(".alert-chip-remove");
+  if (remove) {
+    event.stopPropagation();
+    const id = remove.closest(".alert-chip")?.dataset.alertId;
+    const before = alertRules();
+    await commitRules(panel, before.filter((rule) => rule.id !== id), () => before);
+    return;
+  }
+
+  if (event.target.closest(".alerts-add")) {
+    event.stopPropagation();
+    if (!validateEntry(panel)) return;
+    const input = panel.querySelector(".alerts-input");
+    const kind = activeKind(panel);
+    const conid = panel.dataset.alertConid;
+    const raw = input.value.trim();
+    const rule = kind === "DATE"
+      ? { conid, kind, date: raw }
+      : { conid, kind, price: String(Number(raw.replace(",", "."))) };
+    // Идентификатор считает сервер, но он нужен здесь и сейчас, чтобы чип можно
+    // было нарисовать и удалить до того, как ответ вернётся.
+    rule.id = `local-${conid}-${kind}-${rule.price || rule.date}`;
+    const before = alertRules();
+    if (before.some((item) => item.conid === conid && item.kind === kind
+      && (item.price === rule.price) && (item.date === rule.date))) {
+      setFeedback(panel, "такое уведомление уже стоит", "is-bad");
+      return;
+    }
+    await commitRules(panel, [...before, { ...rule, _pending: true }], () => before);
+    return;
+  }
+});
+
+byId("portfolioBody").addEventListener("input", (event) => {
+  const panel = alertPanelOf(event.target);
+  if (panel && event.target.classList.contains("alerts-input")) validateEntry(panel);
+});
+
+// Перехватывающего слушателя здесь НЕТ намеренно. Он тут был — чтобы клик по панели
+// не схлопывал строку, — и глушил собственные обработчики этого файла: stopPropagation
+// в фазе перехвата не пускает событие ко всплывающим, то есть к коду выше. А нужен он
+// не был: панель лежит в соседней строке tr.detail-row, и обработчик раскрытия,
+// который ищет closest("tr.data-row"), до неё не достаёт.

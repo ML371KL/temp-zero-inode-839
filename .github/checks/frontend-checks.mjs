@@ -1212,6 +1212,188 @@ async function checkLastExitTile(ctx) {
   );
 }
 
+/**
+ * The alert panel: the only input on a page of outputs, and the only control whose
+ * effect happens on a machine the browser cannot see.
+ *
+ * What has to hold:
+ *  * **A short is offered a buy-back, not a sale.** Naming the wrong trade in the
+ *    control that sets the alert is the same failure as naming it in the message.
+ *  * **A rule reaches the server and comes back.** The page draws what the server
+ *    parsed, not what it believes it sent, so the round trip is the feature.
+ *  * **A failed write is visible on the rule itself.** One that looks set and never
+ *    arrived is worse than none at all.
+ *  * **Nothing survives the lock** — a half-typed price is a position disclosed.
+ */
+async function checkAlertsPanel(ctx) {
+  const failures = [];
+  const rows = (ctx.payload.rows || []).filter((row) => row.conid);
+  const short = rows.find((row) => String(row.direction).toUpperCase() === "SHORT");
+  const long = rows.find((row) => String(row.direction).toUpperCase() !== "SHORT");
+  const key = liveQuotesKey();
+  const withLayer = {
+    ...ctx.payload,
+    liveQuotes: {
+      schemaVersion: 1, url: `${ctx.site.origin}/data/quotes.enc`,
+      algorithm: "AES-GCM", aad: "temp-zero-inode-839:quotes:v1",
+      key: Buffer.from(key).toString("base64"),
+    },
+  };
+  const snapshot = (alerts) => ({
+    schemaVersion: 1, generatedAt: new Date().toISOString(),
+    quotes: Object.fromEntries(rows.slice(0, 3).map((row) => [String(row.conid), {
+      price: "100", currency: row.currency || "USD", type: "LAST",
+      marketTime: new Date().toISOString(), fetchedAt: new Date().toISOString(),
+      source: "yahoo-batch", freshness: "fresh", delayedByMinutes: 0,
+      providerSymbol: row.symbol || "X",
+    }])),
+    overlay: { schemaVersion: 1, basedOn: { generatedAt: ctx.payload.generatedAt },
+               rows: {}, totals: {} },
+    alerts,
+  });
+
+  const open = async (page, row) => {
+    await page.click(`tr.data-row[data-row-key="${row.rowId}"]`);
+    await page.waitForSelector(".alerts-panel", { timeout: 5000 }).catch(() => {});
+  };
+
+  // (a) Labels follow the direction, and existing rules are drawn from the server.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot({
+        rules: [{ id: "r1", conid: String(long.conid), kind: "SELL_ABOVE", price: "123.45" }],
+        state: { r1: { armed: true } }, writeUrl: `${ctx.site.origin}/alerts-sink`,
+      }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+
+      await open(session.page, long);
+      const seen = await session.page.evaluate(() => {
+        const panel = document.querySelector(".alerts-panel");
+        return panel ? {
+          kinds: [...panel.querySelectorAll(".alerts-kind")].map((n) => n.textContent.trim()),
+          chips: [...panel.querySelectorAll(".alert-chip-what")].map((n) => n.textContent.trim()),
+          notes: [...panel.querySelectorAll(".alert-chip-note")].map((n) => n.textContent.trim()),
+        } : null;
+      });
+      if (!seen) failures.push("long: no alert panel in the expanded row");
+      else {
+        if (!seen.kinds.includes("Продать")) {
+          failures.push(`long: the panel offers ${JSON.stringify(seen.kinds)}, expected a sale`);
+        }
+        if (!seen.chips.some((text) => text.includes("123,45") || text.includes("123.45"))) {
+          failures.push(`long: the server's rule is not drawn — ${JSON.stringify(seen.chips)}`);
+        }
+        if (!seen.notes.some((text) => /сервер/.test(text))) {
+          failures.push(`long: a stored rule does not say it is checked on the server — ${JSON.stringify(seen.notes)}`);
+        }
+      }
+      failures.push(...consoleFailures(session).map((item) => `panel: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (b) A short is offered the buy-back.
+  if (short) {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot({
+        rules: [], state: {}, writeUrl: `${ctx.site.origin}/alerts-sink`,
+      }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+      await open(session.page, short);
+      const kinds = await session.page.$$eval(".alerts-kind",
+        (nodes) => nodes.map((n) => n.textContent.trim()));
+      if (!kinds.includes("Откупить")) {
+        failures.push(`short: the panel offers ${JSON.stringify(kinds)}, expected a buy-back`);
+      }
+      if (kinds.includes("Продать")) {
+        failures.push("short: the panel offers a sale, which is not how a short is closed");
+      }
+    } finally {
+      await session.close();
+    }
+  } else {
+    failures.push("the fixture holds no short position, so the direction rule is untested");
+  }
+
+  // (c) A refused write is visible on the rule.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot({
+        rules: [], state: {},
+        // A URL that will answer 404 to the PUT: the sink does not exist.
+        writeUrl: `${ctx.site.origin}/nope/alerts.enc`,
+      }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+      await open(session.page, long);
+      await session.page.evaluate(() => {
+        const panel = document.querySelector(".alerts-panel");
+        panel.querySelector(".alerts-input").value = "42";
+        panel.querySelector(".alerts-input").dispatchEvent(new Event("input", { bubbles: true }));
+        panel.querySelector(".alerts-add").click();
+      });
+      await new Promise((r) => setTimeout(r, 1200));
+      const feedback = await session.page.$eval(".alerts-feedback",
+        (node) => node.textContent.trim()).catch(() => "");
+      const chips = await session.page.$$eval(".alert-chip",
+        (nodes) => nodes.length).catch(() => 0);
+      if (!feedback) {
+        failures.push("refused write: the panel says nothing about the failure");
+      }
+      if (chips) {
+        failures.push("refused write: the rule stayed on screen as though it had been saved");
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (d) The lock takes the panel and anything typed into it.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot({
+        rules: [{ id: "r1", conid: String(long.conid), kind: "BUY_BELOW", price: "777.77" }],
+        state: {}, writeUrl: `${ctx.site.origin}/alerts-sink`,
+      }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+      await open(session.page, long);
+      await session.page.click("#lockButton");
+      await new Promise((r) => setTimeout(r, 800));
+      const left = await session.page.evaluate(() => ({
+        panels: document.querySelectorAll(".alerts-panel").length,
+        text: /777[.,]77/.test(document.documentElement.innerHTML),
+      }));
+      if (left.panels) failures.push("lock: the alert panel survives");
+      if (left.text) failures.push("lock: an alert level survives in the DOM");
+    } finally {
+      ctx.site.withdrawLiveQuotes();
+      await session.close();
+    }
+  }
+
+  ctx.report.record(
+    "the alert panel names the right trade, round-trips a rule and admits a failure",
+    failures,
+    "4 scenarios",
+  );
+}
+
 async function checkXss(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1455,6 +1637,7 @@ async function main() {
     await checkSchemaAndFailures(ctx);
     await checkLiveLayer(ctx);
     await checkLastExitTile(ctx);
+    await checkAlertsPanel(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);
   } finally {
