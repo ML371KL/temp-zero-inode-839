@@ -1112,3 +1112,13 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .table-wrap td .live-price.live-up { color: var(--positive); }
 .table-wrap td .live-price.live-down { color: var(--negative); }
 .table-wrap td .live-price.live-flat { color: var(--ink-3); }
+
+/* Процент движения цены с момента выхода. Внутри `.detail-item strong`, поэтому
+   кегль наследуется от плашки — размеры карточек в гриде остаются одинаковыми. */
+.exit-drift {
+  margin-left: 6px;
+  font-size: 0.86em;
+  font-variant-numeric: tabular-nums;
+}
+.detail-item strong .exit-drift.positive { color: var(--positive); }
+.detail-item strong .exit-drift.negative { color: var(--negative); }

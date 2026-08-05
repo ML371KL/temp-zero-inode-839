@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260805-1";
+} from "./charts.js?v=20260805-2";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -3007,6 +3007,73 @@ function cycleMarkup(row) {
   }).join("") || '<div class="muted-value">Циклы отсутствуют</div>';
 }
 
+/**
+ * Цена последнего выхода из инструмента и движение цены с тех пор.
+ *
+ * Выход — это `action: "EXIT"`, а не «продажа»: для длинной позиции выходом
+ * действительно является продажа, для короткой — обратный выкуп. Поле `action`
+ * уже различает их правильно, и брать вместо него `side` значило бы для шортов
+ * показать цену открытия вместо цены закрытия.
+ *
+ * Берётся последняя по времени сделка, а не средняя цена выхода: вопрос владельца —
+ * «почём я вышел в последний раз», а `averageExit` отвечает на другой.
+ */
+function lastExitTrade(row) {
+  let best = null;
+  for (const cycle of row?.cycles || []) {
+    for (const trade of cycle?.trades || []) {
+      if (String(trade?.action || "").toUpperCase() !== "EXIT") continue;
+      if (numberValue(trade?.price) === null) continue;
+      if (!best || String(trade.timestamp || "") > String(best.timestamp || "")) {
+        best = trade;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Плашка «сколько цена прошла с моего выхода».
+ *
+ * Знак раскрашен одинаково для длинных и коротких, и это осознанно: величина
+ * отвечает на вопрос «не рано ли я вышел и стоит ли заходить снова», а не на
+ * вопрос о прибыли. Для шорта зелёный здесь НЕ означает заработок, поэтому
+ * подпись в title говорит, что это движение цены, а не результат.
+ */
+function lastExitTileHtml(row) {
+  const exit = lastExitTrade(row);
+  if (!exit) return "";
+  const short = String(row.direction || "").toUpperCase() === "SHORT";
+  const label = short ? "Последняя цена откупа" : "Последняя цена продажи";
+  const exitPrice = numberValue(exit.price);
+  const shown = formatMoney(exit.price, row.currency, true);
+
+  // Живая цена, если она есть, иначе цена снимка: смысл плашки — расстояние до
+  // текущего рынка, и считать его от вчерашней цены значит отвечать не на тот вопрос.
+  const live = liveQuoteFor(row);
+  const fresh = live && liveSnapshotAgeMs() !== null
+    && liveSnapshotAgeMs() <= LIVE_QUOTES_MAX_AGE_MS ? live : null;
+  const current = numberValue((fresh || row.currentPrice || {}).price);
+
+  let drift = "";
+  if (current !== null && exitPrice) {
+    const percent = ((current - exitPrice) / Math.abs(exitPrice)) * 100;
+    const tone = Math.abs(percent) < 0.005 ? "" : (percent > 0 ? "positive" : "negative");
+    const sign = percent > 0 ? "+" : "";
+    drift = ` <span class="exit-drift ${tone}">${escapeHtml(sign + formatNumber(percent, 2))} %</span>`;
+  }
+  const title = [
+    `выход ${formatDate(exit.timestamp, true)}`,
+    exit.quantity ? `количество ${formatNumber(exit.quantity, 8)}` : null,
+    current === null ? null : `текущая ${formatMoney(current, row.currency, true)}`
+      + (fresh ? " (живая)" : " (снимок)"),
+    "процент — движение цены с момента выхода, а не результат по позиции",
+  ].filter(Boolean).join(" · ");
+
+  return `<div class="detail-item" title="${escapeHtml(title)}"><span>${label}</span>`
+    + `<strong>${shown}${drift}</strong></div>`;
+}
+
 function detailHtml(row) {
   const review = (row.reviewReasons || []).length
     ? `<div class="review-box">${row.reviewReasons.map(escapeHtml).join("<br>")}</div>`
@@ -3029,6 +3096,7 @@ function detailHtml(row) {
             <div class="detail-item"><span>Conid</span><strong>${escapeHtml(row.conid)}</strong></div>
             <div class="detail-item"><span>Биржа</span><strong>${escapeHtml(row.exchange || "—")}</strong></div>
             <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
+            ${lastExitTileHtml(row)}
             ${optional("История тикеров",
               escapeHtml(history.join(" → ")), history.length > 1)}
             ${optional("Себестоимость позиции, AVCO",

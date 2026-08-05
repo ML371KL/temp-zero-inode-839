@@ -1108,6 +1108,88 @@ async function checkLiveLayer(ctx) {
   );
 }
 
+/**
+ * The last-exit tile: the price the owner got out at, and how far the market has
+ * moved since. It exists to answer "is it worth going back in", so the two things
+ * that matter are that it reads the exit and not the entry, and that a short reads
+ * its buy-back rather than the sale that opened it.
+ */
+async function checkLastExitTile(ctx) {
+  const failures = [];
+  const withExit = (ctx.payload.rows || []).filter((row) =>
+    (row.cycles || []).some((cycle) =>
+      (cycle.trades || []).some((trade) => String(trade.action).toUpperCase() === "EXIT")));
+
+  if (!withExit.length) {
+    ctx.report.record("the last-exit tile reads the exit, not the entry", [
+      "the fixture has no closed cycle at all, so this check proves nothing",
+    ]);
+    return;
+  }
+
+  const session = await openPage(ctx.browser);
+  try {
+    ctx.site.serve(await encryptEnvelope(ctx.envelope, ctx.payload, ctx.password));
+    await goto(session.page, ctx.site.origin);
+    await unlock(session.page, ctx.password);
+
+    for (const row of withExit.slice(0, 3)) {
+      const exits = (row.cycles || []).flatMap((cycle) =>
+        (cycle.trades || []).filter((t) => String(t.action).toUpperCase() === "EXIT"));
+      const newest = exits.sort((a, b) =>
+        String(a.timestamp).localeCompare(String(b.timestamp))).at(-1);
+      const short = String(row.direction || "").toUpperCase() === "SHORT";
+
+      await session.page.click(`tr.data-row[data-row-key="${row.rowId}"]`);
+      const tile = await session.page.evaluate((rowId) => {
+        const anchor = document.querySelector(`tr.data-row[data-row-key="${rowId}"]`);
+        const detail = anchor?.nextElementSibling;
+        const item = [...(detail?.querySelectorAll(".detail-item") || [])]
+          .find((node) => /Последняя цена/.test(node.querySelector("span")?.textContent || ""));
+        return item ? {
+          label: item.querySelector("span").textContent,
+          value: item.querySelector("strong").textContent,
+          drift: item.querySelector(".exit-drift")?.textContent || "",
+          tone: item.querySelector(".exit-drift")?.className || "",
+          title: item.getAttribute("title") || "",
+        } : null;
+      }, row.rowId);
+      await session.page.click(`tr.data-row[data-row-key="${row.rowId}"]`);
+
+      if (!tile) { failures.push(`${row.symbol}: no last-exit tile at all`); continue; }
+      // A short's exit is a buy; labelling it "продажи" would name the wrong trade.
+      const expected = short ? "откупа" : "продажи";
+      if (!tile.label.includes(expected)) {
+        failures.push(`${row.symbol} (${short ? "short" : "long"}): tile says "${tile.label}", expected "${expected}"`);
+      }
+      // The digits of the newest exit price must be the ones on screen — this is what
+      // separates reading the exit from reading averageExit or the entry.
+      const digits = String(newest.price).replace(/[^0-9]/g, "").slice(0, 4);
+      if (digits && !tile.value.replace(/[^0-9]/g, "").includes(digits)) {
+        failures.push(`${row.symbol}: tile shows "${tile.value}", newest exit was ${newest.price}`);
+      }
+      if (tile.drift && !/^[+-]?[\d\s.,]+%$/.test(tile.drift.trim())) {
+        failures.push(`${row.symbol}: drift "${tile.drift}" is not a signed percentage`);
+      }
+      if (tile.drift && !/positive|negative/.test(tile.tone) && !/^[+-]?0[.,]00/.test(tile.drift.trim())) {
+        failures.push(`${row.symbol}: drift "${tile.drift}" carries no sign colour`);
+      }
+      if (!tile.title.includes("не результат")) {
+        failures.push(`${row.symbol}: the tooltip does not say the percentage is price movement, not P&L`);
+      }
+    }
+    failures.push(...consoleFailures(session).map((item) => `last-exit tile: ${item}`));
+  } finally {
+    await session.close();
+  }
+
+  ctx.report.record(
+    "the last-exit tile reads the exit, not the entry",
+    failures,
+    `${Math.min(3, withExit.length)} instruments`,
+  );
+}
+
 async function checkXss(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1350,6 +1432,7 @@ async function main() {
     await checkFrontendGuarantees(ctx);
     await checkSchemaAndFailures(ctx);
     await checkLiveLayer(ctx);
+    await checkLastExitTile(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);
   } finally {
