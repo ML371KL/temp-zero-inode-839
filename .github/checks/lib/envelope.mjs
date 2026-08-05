@@ -114,3 +114,46 @@ export async function encryptEnvelope(source, payload, password) {
     ciphertext: Buffer.from(ciphertext).toString("base64"),
   };
 }
+
+
+/**
+ * The live quote layer's envelope: AES-GCM under a raw key, with no KDF at all.
+ *
+ * The key is random and travels inside the payload, so there is nothing to derive
+ * here — which is the whole point of the design: the browser gets the key only after
+ * it has already opened the payload, and the quote agent that writes these objects
+ * never holds the dashboard password.
+ *
+ * Its own AAD, deliberately different from the payload's. A scenario below serves a
+ * payload envelope on this route to prove the page refuses it, and that refusal is
+ * exactly what the separate domain buys.
+ */
+export const LIVE_QUOTES_AAD = "temp-zero-inode-839:quotes:v1";
+
+export function liveQuotesKey() {
+  return webcrypto.getRandomValues(new Uint8Array(32));
+}
+
+export async function encryptLiveQuotes(snapshot, rawKey, { aad = LIVE_QUOTES_AAD } = {}) {
+  const key = await webcrypto.subtle.importKey(
+    "raw", rawKey, { name: "AES-GCM" }, false, ["encrypt"],
+  );
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const body = gzipSync(Buffer.from(JSON.stringify(snapshot), "utf8"), { mtime: 0 });
+  const ciphertext = await webcrypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: encoder.encode(aad), tagLength: 128 },
+    key,
+    body,
+  );
+  return {
+    format: "ibkr-quotes-aes-gcm",
+    version: 1,
+    cipher: {
+      name: "AES-GCM",
+      iv: Buffer.from(iv).toString("base64"),
+      aad: Buffer.from(aad, "utf8").toString("base64"),
+    },
+    compression: "gzip",
+    ciphertext: Buffer.from(ciphertext).toString("base64"),
+  };
+}

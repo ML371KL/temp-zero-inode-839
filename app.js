@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260727-9";
+} from "./charts.js?v=20260805-1";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -42,6 +42,18 @@ const EXPECTED_AAD = "temp-zero-inode-839:portfolio:v1";
 // profile. It expires so that a device left behind stops being a key eventually.
 const DEVICE_KEY_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SEARCH_DEBOUNCE_MS = 200;
+// Домен живого слоя. Свой, не payload'а: конверт, открывающийся под чужим AAD, —
+// ровно та ошибка, ради которой AAD и существует. Без разделения payload, попавший
+// в бакет котировок, расшифровался бы здесь и нарисовался как цены.
+const LIVE_QUOTES_AAD = "temp-zero-inode-839:quotes:v1";
+const LIVE_QUOTES_FORMAT = "ibkr-quotes-aes-gcm";
+// Агент выкладывает снимок не чаще, чем меняются цифры, и держит Cache-Control 10 с.
+// Опрашивать чаще — значит платить запросами за один и тот же объект.
+const LIVE_QUOTES_REFRESH_MS = 20_000;
+// Позже этого срока снимок перестаёт быть живым слоем и убирается со страницы.
+// Не «показать посерее»: цена, помеченная как живая и отставшая на десять минут,
+// хуже отсутствия живого слоя, потому что по ней принимают решение.
+const LIVE_QUOTES_MAX_AGE_MS = 4 * 60 * 1000;
 
 const state = {
   envelope: null,
@@ -63,7 +75,118 @@ const state = {
   assetScope: new Set(),
   // Conids the pipeline refused to put in its own totals. Rebuilt from every payload.
   quarantined: new Set(),
+  // Живой слой. Держится ОТДЕЛЬНО от payload и никогда в него не вписывается:
+  // все денежные итоги на странице посчитаны по ценам снимка, и подмена цены в
+  // строке развалила бы проверку «итоги равны сумме строк», которая эти итоги и
+  // стережёт. Живая цена показывается рядом, а не вместо.
+  liveQuotes: null,
+  liveKey: null,
+  liveError: null,
+  liveTimer: null,
 };
+
+/* ------------------------------------------------------------ live quotes --- */
+
+/*
+ * Живые котировки лежат отдельным зашифрованным объектом, а ключ к нему — внутри
+ * payload. Порядок здесь и есть весь смысл схемы: ключ становится известен только
+ * после того, как payload открыт паролем, поэтому живой слой не стоит владельцу ни
+ * второго ввода пароля, ни одной лишней итерации PBKDF2, а ключ, снятый с сервера,
+ * даёт цены и не ведёт обратно к payload.
+ */
+
+async function importLiveKey(descriptor) {
+  return crypto.subtle.importKey(
+    "raw",
+    bytesFromBase64(descriptor.key),
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+}
+
+async function fetchLiveQuotes(descriptor, key) {
+  // no-store, а не reload: объект переписывается чаще, чем истекает любой кэш, и
+  // единственный честный ответ на «какая сейчас цена» — тот, что пришёл сейчас.
+  const response = await fetch(descriptor.url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const envelope = await response.json();
+  if (envelope.format !== LIVE_QUOTES_FORMAT) {
+    throw new Error("Это не конверт живых котировок.");
+  }
+  const aad = new TextEncoder().encode(LIVE_QUOTES_AAD);
+  const declared = bytesFromBase64(envelope.cipher.aad);
+  if (declared.length !== aad.length
+    || declared.some((byte, index) => byte !== aad[index])) {
+    throw new Error("Конверт не от живого слоя.");
+  }
+  const decrypted = new Uint8Array(await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: bytesFromBase64(envelope.cipher.iv),
+      additionalData: aad,
+      tagLength: 128,
+    },
+    key,
+    bytesFromBase64(envelope.ciphertext),
+  ));
+  const body = String(envelope.compression || "none") === "gzip"
+    ? await inflate(decrypted)
+    : decrypted;
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
+/** Живая котировка строки, если она есть и ещё не протухла. */
+function liveQuoteFor(row) {
+  const quotes = state.liveQuotes?.quotes;
+  if (!quotes) return null;
+  return quotes[String(row?.conid ?? "")] || null;
+}
+
+function liveSnapshotAgeMs() {
+  const generated = timeValue(state.liveQuotes?.generatedAt);
+  return generated === null ? null : Date.now() - generated;
+}
+
+async function refreshLiveQuotes() {
+  const descriptor = state.payload?.liveQuotes;
+  if (!descriptor?.url || !descriptor?.key) return;
+  try {
+    if (!state.liveKey) state.liveKey = await importLiveKey(descriptor);
+    const snapshot = await fetchLiveQuotes(descriptor, state.liveKey);
+    // Тот же порядок, которого держится обработчик обновления: всякий, кто вернулся
+    // из await, обязан заново проверить блокировку. Иначе снимок дорисуется в уже
+    // очищенный DOM — то есть после «Закрыть» на экране снова появятся цены.
+    if (!state.cryptoKey) return;
+    state.liveQuotes = snapshot;
+    state.liveError = null;
+  } catch (error) {
+    // Живой слой не обязателен: страница осталась ровно тем, чем была до него.
+    // Поэтому ошибка гасит слой и печатается строкой, а не всплывает наверх.
+    state.liveQuotes = null;
+    state.liveError = error?.message || String(error);
+  }
+  if (!state.cryptoKey) return;
+  renderLiveNote();
+  renderRows();
+}
+
+function startLiveQuotes() {
+  stopLiveQuotes();
+  if (!state.payload?.liveQuotes?.url) return;
+  refreshLiveQuotes();
+  state.liveTimer = window.setInterval(refreshLiveQuotes, LIVE_QUOTES_REFRESH_MS);
+}
+
+function stopLiveQuotes() {
+  if (state.liveTimer) {
+    window.clearInterval(state.liveTimer);
+    state.liveTimer = null;
+  }
+  state.liveQuotes = null;
+  state.liveKey = null;
+  state.liveError = null;
+}
 
 /* ------------------------------------------------------------- quarantine --- */
 
@@ -2326,6 +2449,50 @@ function renderStatus(payload) {
   `;
 }
 
+/**
+ * Одна строка о живом слое — и она обязана быть скучной, когда всё хорошо.
+ *
+ * Печатает не «сколько котировок пришло», а сколько из них относится к строкам,
+ * которые на странице действительно есть: снимок содержит только открытые позиции,
+ * и «9 живых» рядом с таблицей из 309 строк читалось бы как поломка.
+ */
+function renderLiveNote() {
+  const container = byId("liveQuotesNote");
+  if (!container) return;
+  const descriptor = state.payload?.liveQuotes;
+  if (!descriptor?.url) {
+    container.hidden = true;
+    container.textContent = "";
+    return;
+  }
+  container.hidden = false;
+
+  if (state.liveError) {
+    container.className = "live-note live-note-off";
+    container.textContent = `живые цены недоступны · ${state.liveError} · показан снимок`;
+    return;
+  }
+  const age = liveSnapshotAgeMs();
+  if (age === null || age > LIVE_QUOTES_MAX_AGE_MS) {
+    container.className = "live-note live-note-off";
+    container.textContent = "живые цены устарели · показан снимок";
+    return;
+  }
+  const quotes = state.liveQuotes?.quotes || {};
+  const values = Object.values(quotes);
+  const delayed = values.filter((quote) => Number(quote?.delayedByMinutes) > 0).length;
+  const derived = values.filter((quote) => quote?.derivedFrom).length;
+  const parts = [`живые цены: ${values.length}`];
+  // Отложенные и выведенные считаются отдельно, потому что это разные вещи и обе
+  // надо назвать: первая — цена биржи, которую та придерживает, вторая — цена,
+  // которой на этой площадке вообще не печатали.
+  if (delayed) parts.push(`с задержкой биржи: ${delayed}`);
+  if (derived) parts.push(`выведено из листинга США: ${derived}`);
+  parts.push(`обновлено ${Math.round(age / 1000)} с назад`);
+  container.className = "live-note live-note-on";
+  container.textContent = parts.join(" · ");
+}
+
 /* ---------------------------------------------------------------- filters --- */
 
 function populateSelect(select, values, defaultLabel, compare = null) {
@@ -2913,6 +3080,58 @@ function magnitudeBar(value, max, tone) {
   return `<svg class="cell-bar tone-${tone}" width="100%" height="3" preserveAspectRatio="none" aria-hidden="true"><rect x="${(100 - Number(percent)).toFixed(2)}%" y="0" width="${percent}%" height="3" rx="1.5" /></svg>`;
 }
 
+/**
+ * Живая цена под ценой снимка — второй строкой, а не вместо неё.
+ *
+ * Заменить число было бы честнее на вид и неверно по существу: рыночная стоимость,
+ * нереализованный P&L и все итоги в шапке посчитаны пайплайном по цене снимка, и
+ * строка, где цена живая, а деньги рядом — от снимка, противоречит сама себе.
+ * Пересчитывать их в браузере — отдельное решение, которое владелец сознательно
+ * отложил; до тех пор живая цена стоит рядом и подписана.
+ */
+function liveCellHtml(row, snapshotQuote) {
+  const live = liveQuoteFor(row);
+  if (!live || live.price == null) return "";
+  const age = liveSnapshotAgeMs();
+  if (age === null || age > LIVE_QUOTES_MAX_AGE_MS) return "";
+
+  const currency = live.currency || row.currency;
+  const shown = formatMoney(live.price, currency, true);
+  const previous = numberValue(snapshotQuote?.price);
+  const now = numberValue(live.price);
+  // Смысл живой цены — в том, насколько она разошлась со снимком, а не в самой
+  // цифре: снимок владелец уже видит строкой выше.
+  const drift = previous && now !== null && previous !== 0
+    ? ((now - previous) / previous) * 100
+    : null;
+  const driftText = drift === null
+    ? ""
+    : ` ${drift > 0 ? "+" : ""}${formatNumber(drift, 2)} %`;
+  const tone = drift === null || Math.abs(drift) < 0.005
+    ? "flat"
+    : (drift > 0 ? "up" : "down");
+
+  const delayed = Number(live.delayedByMinutes) > 0;
+  const marks = [];
+  if (live.derivedFrom) {
+    const from = live.derivedFrom;
+    marks.push(`выведено из ${from.usSymbol || "листинга США"}`);
+  }
+  if (delayed) marks.push(`биржа отдаёт с задержкой ${live.delayedByMinutes} мин`);
+  const title = [
+    `живая цена ${shown}`,
+    live.source ? `источник: ${live.source}` : null,
+    live.marketTime ? `время рынка: ${formatDate(live.marketTime, true)}` : null,
+    ...marks,
+  ].filter(Boolean).join(" · ");
+
+  return `<span class="live-price live-${tone} ${delayed ? "live-delayed" : ""}" title="${escapeHtml(title)}">`
+    + `${escapeHtml(shown)}${escapeHtml(driftText)}`
+    + `${live.derivedFrom ? '<span class="live-flag" aria-hidden="true">≈</span>' : ""}`
+    + `${delayed ? '<span class="live-flag" aria-hidden="true">⏱</span>' : ""}`
+    + `</span>`;
+}
+
 function rowHtml(row, scale) {
   const quote = row.currentPrice || {};
   // Priced in the currency the quote itself is denominated in, not the instrument's:
@@ -2949,7 +3168,7 @@ function rowHtml(row, scale) {
       <td class="numeric quantity-cell">${formatNumber(row.quantity, 8)}</td>
       <td class="numeric">${formatMoney(rowAverageEntry(row), row.currency, true)}</td>
       <td class="numeric">${open && row.openNow === undefined ? '<span class="muted-value">—</span>' : formatMoney(row.lifetimeAverageExit ?? row.averageExit, row.currency, true)}</td>
-      <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span></td>
+      <td class="numeric">${price}<span class="row-note ${stale ? "quote-stale" : ""}" title="${escapeHtml(`${quote.type || "UNAVAILABLE"} · ${formatDate(quote.marketTime, true)}`)}">${escapeHtml(priceMeta)}</span>${liveCellHtml(row, quote)}</td>
       <td class="numeric">${formatUsdCell(row.marketValueUsd)}${magnitudeBar(row.marketValueUsd, scale.marketValue, "neutral")}</td>
       <td class="numeric ${pnlClass(row.unrealizedPnlUsd)}">${formatUsdCell(row.unrealizedPnlUsd)}</td>
       <td class="numeric ${pnlClass(row.realizedPnlUsd)}">${formatUsdCell(row.realizedPnlUsd)}</td>
@@ -3280,6 +3499,10 @@ function renderDashboard(payload) {
   renderFilterOptions(payload.rows || []);
   renderRows();
   renderIssues(payload);
+  renderLiveNote();
+  // Последним: слой поверх уже нарисованной страницы, и его отсутствие ничего
+  // из перечисленного выше не задерживает.
+  startLiveQuotes();
 }
 
 function showDashboard(payload, key) {
@@ -3314,6 +3537,9 @@ function lockDashboard(message = "") {
   state.payload = null;
   state.cryptoKey = null;
   state.quarantined = new Set();
+  // Раньше очистки DOM: таймер живого слоя, сработавший после блокировки, дорисовал
+  // бы цены в уже вычищенную таблицу.
+  stopLiveQuotes();
   // A debounced search or a lingering refresh label firing after the lock would
   // call render paths against a null payload — a TypeError in a timer at best.
   if (state.searchTimer) {

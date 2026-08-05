@@ -26,12 +26,21 @@ const MIME = {
 };
 
 export const PAYLOAD_PATH = "/data/portfolio.enc";
+// The live quote layer lives in an R2 bucket in production. Here it is served from
+// the harness origin instead, which `connect-src 'self'` already allows, so the
+// scenarios exercise the page's own fetch/decrypt/render path without depending on
+// a network the runner may not have.
+export const LIVE_QUOTES_PATH = "/data/quotes.enc";
 
 export async function startSite(root) {
   // The one mutable thing in here. A scenario assigns to `.payload` before navigating
   // and every request for the encrypted blob is answered from it.
   const state = {
     payload: { status: 200, body: "{}", type: MIME[".enc"] },
+    // 404 until a scenario says otherwise: the ordinary state of this route in a
+    // check that is not about the live layer is "there is nothing there", and that
+    // is exactly the case the page has to survive.
+    liveQuotes: { status: 404, body: "not found", type: "text/plain" },
   };
 
   const server = createServer((request, response) => {
@@ -40,6 +49,24 @@ export async function startSite(root) {
     // of the filename answers 404 to every asset the page needs.
     const url = new URL(request.url, "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
+
+    if (pathname === LIVE_QUOTES_PATH) {
+      // The delay exists for one scenario and could not be simulated without it:
+      // the layer refreshes every twenty seconds, so a check that locks the page and
+      // looks a moment later never observes a tick at all — it passes on code with
+      // no lock guard whatsoever. Holding the response open puts the lock squarely
+      // inside an unfinished fetch, which is the race the guard is there for.
+      const send = () => {
+        response.writeHead(state.liveQuotes.status, {
+          "content-type": state.liveQuotes.type,
+          "cache-control": "no-store",
+        });
+        response.end(state.liveQuotes.body);
+      };
+      if (state.liveQuotes.delayMs) setTimeout(send, state.liveQuotes.delayMs);
+      else send();
+      return;
+    }
 
     if (pathname === PAYLOAD_PATH) {
       // No-store, because two scenarios in one run serve different bodies from the
@@ -94,6 +121,18 @@ export async function startSite(root) {
         type,
         body: typeof body === "string" ? body : JSON.stringify(body),
       };
+    },
+    serveLiveQuotes(body, { status = 200, type = MIME[".enc"], delayMs = 0 } = {}) {
+      state.liveQuotes = {
+        status,
+        type,
+        delayMs,
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      };
+    },
+    /** Back to "there is nothing there", which is most scenarios' correct state. */
+    withdrawLiveQuotes() {
+      state.liveQuotes = { status: 404, body: "not found", type: "text/plain" };
     },
     async close() {
       await new Promise((resolve) => server.close(resolve));

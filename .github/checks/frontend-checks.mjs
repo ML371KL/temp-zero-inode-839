@@ -24,7 +24,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer";
 
-import { decryptEnvelope, encryptEnvelope } from "./lib/envelope.mjs";
+import {
+  decryptEnvelope,
+  encryptEnvelope,
+  encryptLiveQuotes,
+  liveQuotesKey,
+} from "./lib/envelope.mjs";
 import { startSite } from "./lib/site-server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -922,6 +927,187 @@ function poison(payload) {
   return poisoned;
 }
 
+/**
+ * The live quote layer: an encrypted object the page fetches with a key it finds
+ * inside the payload, drawn beside the snapshot rather than into it.
+ *
+ * Three properties, and each of them is one this project has already been bitten by
+ * in a neighbouring form:
+ *
+ *  * **A number that outlives the lock is a leak.** The layer refreshes on a timer,
+ *    and a timer that fires after "Закрыть" writes prices into a DOM that was cleared
+ *    precisely so nothing would be left in it. The suite already checks this for the
+ *    payload; the live layer is a second, independent source of the same numbers.
+ *  * **An unreachable source must cost nothing.** The bucket is a third party. If its
+ *    absence broke the page, an R2 outage would take the dashboard with it — and the
+ *    dashboard is perfectly usable from the snapshot alone.
+ *  * **A delayed price must not be drawn as a live one.** Toronto stamps a fifteen
+ *    minute old price with the current time. The agent carries the exchange's own
+ *    declared delay so the page can say so; if the page then draws it identically to
+ *    a real-time US quote, everything upstream was pointless.
+ */
+async function checkLiveLayer(ctx) {
+  const failures = [];
+  const rows = (ctx.payload.rows || []).filter((row) => row.conid);
+  const key = liveQuotesKey();
+  const liveUrl = `${ctx.site.origin}/data/quotes.enc`;
+  const payloadWithLayer = {
+    ...ctx.payload,
+    liveQuotes: {
+      schemaVersion: 1,
+      url: liveUrl,
+      algorithm: "AES-GCM",
+      aad: "temp-zero-inode-839:quotes:v1",
+      key: Buffer.from(key).toString("base64"),
+    },
+  };
+  // Prices deliberately unlike the fixture's own, so a cell showing the live figure
+  // cannot be confused with one that simply kept the snapshot.
+  const snapshot = (extra = {}) => ({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    quotes: Object.fromEntries(rows.slice(0, 2).map((row, index) => [
+      String(row.conid),
+      {
+        price: index === 0 ? "1234.5" : "4321.75",
+        currency: row.currency || "USD",
+        type: "LAST",
+        marketTime: new Date().toISOString(),
+        fetchedAt: new Date().toISOString(),
+        source: "yahoo-batch",
+        freshness: "fresh",
+        delayedByMinutes: 0,
+        providerSymbol: row.symbol || "X",
+        ...extra,
+      },
+    ])),
+  });
+
+  // (a) The layer draws, and the lock takes it away again.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, payloadWithLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot(), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await session.page.waitForFunction(
+        () => document.querySelectorAll(".live-price").length > 0,
+        { timeout: 10_000 },
+      ).catch(() => {});
+
+      const drawn = await session.page.$$eval(".live-price", (nodes) => nodes.length);
+      if (drawn === 0) failures.push("live layer: no live price was drawn at all");
+      const noteOn = await session.page.$eval(
+        "#liveQuotesNote", (node) => ({ hidden: node.hidden, text: node.textContent }),
+      );
+      if (noteOn.hidden || !noteOn.text.includes("живые цены")) {
+        failures.push(`live layer: the note does not report the layer — "${noteOn.text}"`);
+      }
+
+      // Lock while a fetch is still in the air. Waiting for the next scheduled tick
+      // instead would mean waiting the whole refresh interval, and a shorter wait
+      // observes no tick at all — which is how the first version of this check passed
+      // against code with every lock guard deleted.
+      ctx.site.serveLiveQuotes(
+        await encryptLiveQuotes(snapshot({ price: "9876.5" }), key),
+        { delayMs: 1200 },
+      );
+      await session.page.evaluate(() => {
+        document.getElementById("refreshButton")?.click();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await session.page.click("#lockButton");
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const leaked = await session.page.evaluate(() => {
+        const html = document.documentElement.innerHTML;
+        return {
+          prices: /1234[.,]5|4321[.,]75|9876[.,]5/.test(html),
+          nodes: document.querySelectorAll(".live-price").length,
+        };
+      });
+      if (leaked.prices) failures.push("live layer: a live price survives the lock in the DOM");
+      if (leaked.nodes) failures.push(`live layer: ${leaked.nodes} live-price nodes survive the lock`);
+      failures.push(...consoleFailures(session).map((item) => `live layer: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (b) The bucket is simply not there.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, payloadWithLayer, ctx.password));
+      ctx.site.withdrawLiveQuotes();
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const state = await session.page.evaluate(() => ({
+        rows: document.querySelectorAll("#portfolioBody tr.data-row").length,
+        live: document.querySelectorAll(".live-price").length,
+        note: document.getElementById("liveQuotesNote")?.textContent || "",
+      }));
+      if (state.rows !== (ctx.payload.rows || []).length) {
+        failures.push(`live layer offline: ${state.rows} rows drawn, expected ${(ctx.payload.rows || []).length}`);
+      }
+      if (state.live !== 0) failures.push("live layer offline: prices drawn from nowhere");
+      if (!state.note.includes("недоступны") && !state.note.includes("снимок")) {
+        failures.push(`live layer offline: the note does not say so — "${state.note}"`);
+      }
+      // A failed fetch legitimately logs a network error; only page exceptions matter.
+      const thrown = consoleFailures(session).filter((item) => /exception/i.test(item));
+      failures.push(...thrown.map((item) => `live layer offline: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (c) A delayed quote carries its mark.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, payloadWithLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(
+        snapshot({ delayedByMinutes: 15, freshness: "delayed" }), key,
+      ));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await session.page.waitForFunction(
+        () => document.querySelectorAll(".live-price").length > 0,
+        { timeout: 10_000 },
+      ).catch(() => {});
+      const marked = await session.page.$$eval(
+        ".live-price",
+        (nodes) => nodes.map((node) => ({
+          delayed: node.classList.contains("live-delayed"),
+          title: node.getAttribute("title") || "",
+        })),
+      );
+      if (!marked.length) failures.push("delayed quote: nothing drawn");
+      if (marked.some((item) => !item.delayed)) {
+        failures.push("delayed quote: drawn without the delayed class — indistinguishable from real-time");
+      }
+      if (marked.some((item) => !item.title.includes("задержк"))) {
+        failures.push("delayed quote: the tooltip does not mention the delay");
+      }
+      const note = await session.page.$eval("#liveQuotesNote", (node) => node.textContent);
+      if (!note.includes("задержк")) {
+        failures.push(`delayed quote: the note does not count them — "${note}"`);
+      }
+    } finally {
+      ctx.site.withdrawLiveQuotes();
+      await session.close();
+    }
+  }
+
+  ctx.report.record(
+    "the live layer draws, vanishes on lock, and survives its source going away",
+    failures,
+    `${rows.length ? Math.min(2, rows.length) : 0} instruments, 3 scenarios`,
+  );
+}
+
 async function checkXss(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1163,6 +1349,7 @@ async function main() {
     await checkScopeReachable(ctx);
     await checkFrontendGuarantees(ctx);
     await checkSchemaAndFailures(ctx);
+    await checkLiveLayer(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);
   } finally {

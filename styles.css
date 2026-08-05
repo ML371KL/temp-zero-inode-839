@@ -1070,3 +1070,45 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
      what removes the overflow at 800-830 outright. */
   .scope-filter > summary { width: auto; max-width: 188px; }
 }
+
+/* ------------------------------------------------------------- живой слой --- */
+/* Живая цена стоит ПОД ценой снимка и подписана. Она не заменяет число, по которому
+   посчитаны деньги в той же строке, поэтому и выглядеть должна как приписка, а не
+   как основная величина: тот же кегль, что у row-note, и цвет по знаку расхождения. */
+.live-price {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--ink-3);
+}
+/* Те же переменные, что у денежных колонок: расхождение живой цены со снимком —
+   такая же величина со знаком, и красить её отдельной палитрой значило бы завести
+   второй язык для того же смысла. */
+.live-price.live-up { color: var(--positive); }
+.live-price.live-down { color: var(--negative); }
+.live-price.live-flat { color: var(--ink-3); }
+/* Отложенная цена не имеет права выглядеть как живая: приглушается и получает знак. */
+.live-price.live-delayed { opacity: 0.75; }
+.live-flag {
+  margin-left: 3px;
+  opacity: 0.8;
+}
+
+.live-note {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.01em;
+}
+.live-note-on { color: var(--ink-3); }
+/* Не красный: отсутствие живого слоя — не поломка дашборда, снимок на месте
+   и все числа верны. Это сообщение, а не тревога. */
+.live-note-off { color: var(--ink-3); opacity: 0.85; }
+
+/* `.table-wrap td` задаёт цвет ячейки и выигрывает у голого класса — ровно то же
+   замечание, что уже записано для знаковых цветов выше. Без этой строки живая цена
+   выходит обычными чернилами и перестаёт отличаться от цены снимка. */
+.table-wrap td .live-price.live-up { color: var(--positive); }
+.table-wrap td .live-price.live-down { color: var(--negative); }
+.table-wrap td .live-price.live-flat { color: var(--ink-3); }

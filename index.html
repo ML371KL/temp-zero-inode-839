@@ -7,12 +7,18 @@
     <meta name="theme-color" content="#070e17" />
     <meta name="robots" content="noindex,nofollow,noarchive" />
     <meta name="referrer" content="no-referrer" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
+    <!-- connect-src перечисляет ровно два адреса, и второй появился не бесплатно.
+         Это страница, на которой вводится пароль от портфеля, и каждый хост здесь —
+         адрес, куда скомпрометированный скрипт смог бы его отправить. Живой слой
+         лежит в одном публичном объекте R2; хост назван целиком, без подстановки,
+         чтобы список читался как «куда именно», а не «куда угодно в этом домене».
+         Сам объект зашифрован ключом, который приходит внутри payload. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://pub-b6604368d9c24cfab25dcb13b5aff6ac.r2.dev; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'" />
     <title>Portfolio Ledger</title>
     <!-- Inline so there is no extra request and no 404 on every load. `img-src` already
          allows data: URIs, so this needs no change to the Content-Security-Policy. -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230f1d2b'/%3E%3Cpath d='M4 17 L9 11 L13 14 L20 6' fill='none' stroke='%2383e0c1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="styles.css?v=20260729-2" />
+    <link rel="stylesheet" href="styles.css?v=20260805-1" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -83,6 +89,7 @@
 
       <section id="dashboardView" hidden>
         <div id="dataStatus" class="data-status"></div>
+        <p id="liveQuotesNote" class="live-note" role="status" aria-live="polite" hidden></p>
         <div id="schemaWarning" class="schema-warning" role="status" hidden></div>
         <!-- Инструменты, вынесенные бэкендом за пределы итогов: курс 1:1 -->
         <div id="quarantineNotice" class="schema-warning quarantine-notice" role="status" hidden></div>
@@ -309,6 +316,6 @@
 
     <div id="chartTooltip" class="chart-tooltip" role="tooltip" hidden></div>
 
-    <script type="module" src="app.js?v=20260731-1"></script>
+    <script type="module" src="app.js?v=20260805-1"></script>
   </body>
 </html>
