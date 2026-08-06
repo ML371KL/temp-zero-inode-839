@@ -1394,6 +1394,184 @@ async function checkAlertsPanel(ctx) {
   );
 }
 
+/**
+ * Что аудит нашёл непокрытым: успешная запись, наполненные итоги, протухший
+ * снимок и сохранность ввода. Каждый из этих четырёх пробелов давал проверкам
+ * зелёный свет на поведении, которое на боевой странице было бы отказом.
+ */
+async function checkAuditGaps(ctx) {
+  const failures = [];
+  const rows = (ctx.payload.rows || []).filter((row) => row.conid);
+  const target = rows[0];
+  const key = liveQuotesKey();
+  const withLayer = {
+    ...ctx.payload,
+    liveQuotes: {
+      schemaVersion: 1, url: `${ctx.site.origin}/data/quotes.enc`,
+      algorithm: "AES-GCM", aad: "temp-zero-inode-839:quotes:v1",
+      key: Buffer.from(key).toString("base64"),
+    },
+  };
+  const snapshot = ({ generatedAt = ctx.payload.generatedAt, totals = {}, age = 0,
+                      rules = [] } = {}) => ({
+    schemaVersion: 1,
+    generatedAt: new Date(Date.now() - age).toISOString(),
+    quotes: Object.fromEntries(rows.slice(0, 3).map((row) => [String(row.conid), {
+      price: "1234.5", currency: row.currency || "USD", type: "LAST",
+      marketTime: new Date().toISOString(), fetchedAt: new Date().toISOString(),
+      source: "yahoo-batch", freshness: "fresh", delayedByMinutes: 0,
+      providerSymbol: row.symbol || "X",
+    }])),
+    overlay: { schemaVersion: 1, basedOn: { generatedAt }, rows: {}, totals },
+    alerts: { rules, state: {}, writeUrl: `${ctx.site.origin}/data/alerts-sink` },
+  });
+
+  const openRow = async (page) => {
+    await page.click(`tr.data-row[data-row-key="${target.rowId}"]`);
+    await page.waitForSelector(".alerts-panel", { timeout: 5000 }).catch(() => {});
+  };
+
+  // (a) Записанное правило действительно уходит на сервер — и с той ценой.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.resetAlertPuts(200);
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot(), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+      await openRow(session.page);
+      await session.page.evaluate(() => {
+        const panel = document.querySelector(".alerts-panel");
+        const input = panel.querySelector(".alerts-input");
+        input.value = "77,25";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        panel.querySelector(".alerts-add").click();
+      });
+      await new Promise((r) => setTimeout(r, 1500));
+
+      const puts = ctx.site.alertPuts();
+      if (!puts.length) failures.push("save: nothing was PUT at all");
+      else {
+        const envelope = JSON.parse(puts.at(-1).body);
+        if (envelope.format !== "ibkr-alerts-aes-gcm") {
+          failures.push(`save: wrong envelope format ${envelope.format}`);
+        }
+        // Расшифровываем то, что реально ушло: только это отличает «запись прошла»
+        // от «записалось именно то, что ввели».
+        const { webcrypto } = await import("node:crypto");
+        const { gunzipSync } = await import("node:zlib");
+        const raw = await webcrypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: Buffer.from(envelope.cipher.iv, "base64"),
+            additionalData: new TextEncoder().encode("temp-zero-inode-839:alerts:v1"),
+            tagLength: 128,
+          },
+          await webcrypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["decrypt"]),
+          Buffer.from(envelope.ciphertext, "base64"),
+        );
+        const body = JSON.parse(gunzipSync(Buffer.from(raw)).toString("utf8"));
+        const rule = (body.rules || [])[0];
+        if (!rule) failures.push("save: the uploaded document holds no rule");
+        else {
+          // Запятая — привычный разделитель; она обязана доехать как 77.25.
+          if (rule.price !== "77.25") {
+            failures.push(`save: uploaded price is ${rule.price}, expected 77.25`);
+          }
+          if (String(rule.conid) !== String(target.conid)) {
+            failures.push(`save: uploaded conid ${rule.conid}, expected ${target.conid}`);
+          }
+        }
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (b) Итоги из перекрытия действительно попадают в шапку.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(
+        snapshot({ totals: { marketValueUsd: "424242.42" } }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 1200));
+      const shown = await session.page.evaluate(() => document.body.textContent);
+      if (!/424[\s ]?242/.test(shown)) {
+        failures.push("totals: the overlay's market value never reaches the page");
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (c) Просроченный снимок не применяется.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(
+        snapshot({ totals: { marketValueUsd: "555555.55" }, age: 60 * 60 * 1000 }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 1200));
+      const shown = await session.page.evaluate(() => document.body.textContent);
+      if (/555[\s ]?555/.test(shown)) {
+        failures.push("expiry: an hour-old snapshot was applied as live");
+      }
+      if (/1[\s ]?234[.,]5/.test(shown)) {
+        failures.push("expiry: an hour-old price was drawn as the current one");
+      }
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (d) Тик живого слоя не стирает недонабранную цену.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot(), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+      await openRow(session.page);
+      await session.page.focus(".alerts-input");
+      await session.page.evaluate(() => {
+        const input = document.querySelector(".alerts-panel .alerts-input");
+        input.value = "9";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      // Тик приходит раз в двадцать секунд; вызываем перерисовку тем же путём.
+      await session.page.evaluate(() => document.getElementById("refreshButton")?.click());
+      await new Promise((r) => setTimeout(r, 1500));
+      const state = await session.page.evaluate(() => {
+        const input = document.querySelector(".alerts-panel .alerts-input");
+        return { value: input?.value ?? null, focused: document.activeElement === input };
+      });
+      if (state.value !== "9") {
+        failures.push(`typing: a half-typed price became "${state.value}" after a refresh`);
+      }
+      if (!state.focused) failures.push("typing: focus left the field on a refresh");
+    } finally {
+      ctx.site.withdrawLiveQuotes();
+      ctx.site.resetAlertPuts(200);
+      await session.close();
+    }
+  }
+
+  ctx.report.record(
+    "a saved rule really arrives, live totals reach the header, a stale snapshot does not, and typing survives",
+    failures,
+    "4 scenarios",
+  );
+}
+
 async function checkXss(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1638,6 +1816,7 @@ async function main() {
     await checkLiveLayer(ctx);
     await checkLastExitTile(ctx);
     await checkAlertsPanel(ctx);
+    await checkAuditGaps(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);
   } finally {

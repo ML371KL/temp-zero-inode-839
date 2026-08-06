@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260805-5";
+} from "./charts.js?v=20260806-1";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -89,6 +89,13 @@ const state = {
   alertRules: [],
   alertKey: null,
   alertError: null,
+  alertsSentAt: 0,
+  // Недонабранное значение и то, где стоял курсор. В DOM это держать нельзя:
+  // строку перерисовывает и тик живого слоя, и кнопка обновления, и смена среза —
+  // а набранная наполовину цена обязана пережить их все, иначе ввести уровень
+  // нельзя в принципе, если печатать медленнее двадцати секунд.
+  alertDraft: {},
+  alertFocus: null,
   liveError: null,
   liveTimer: null,
 };
@@ -208,6 +215,10 @@ function payloadWithLive(payload) {
 
 const ALERT_AAD = "temp-zero-inode-839:alerts:v1";
 const ALERT_KINDS = ["BUY_BELOW", "SELL_ABOVE", "DATE"];
+// Сколько ждать, пока сервер увидит только что записанные правила, прежде чем
+// снова верить его списку. Больше двух тиков живого слоя и меньше времени,
+// за которое человек успеет решить, что запись потерялась.
+const ALERT_SYNC_GRACE_MS = 90_000;
 
 function alertsSection() {
   return state.liveQuotes?.alerts || null;
@@ -314,8 +325,18 @@ async function refreshLiveQuotes() {
     // Правила берутся от сервера — он источник правды, а не то, что браузер думает,
     // что записал. Пока висит несохранённое изменение, местный список сохраняется:
     // иначе ответ сервера, отставший на один тик, стёр бы только что добавленный чип.
-    if (!alertRules().some((rule) => rule._pending || rule._failed)) {
-      state.alertRules = snapshot.alerts?.rules || [];
+    // Ответ сервера отстаёт от записи на один-два тика. Раньше он безусловно
+    // перетирал местный список — и второй добавленный алерт ложился поверх
+    // устаревшего ответа, стирая первый. Пока набор правил у сервера не совпал
+    // с тем, что мы отправили, местный список главнее.
+    const serverRules = snapshot.alerts?.rules || [];
+    const key = (rules) => rules.map((rule) => String(rule.id)).sort().join("|");
+    const settled = key(serverRules) === key(state.alertRules || []);
+    const waiting = state.alertsSentAt
+      && Date.now() - state.alertsSentAt < ALERT_SYNC_GRACE_MS;
+    if (settled || !waiting) {
+      state.alertRules = serverRules;
+      if (settled) state.alertsSentAt = 0;
     }
   } catch (error) {
     // Живой слой не обязателен: страница осталась ровно тем, чем была до него.
@@ -324,6 +345,15 @@ async function refreshLiveQuotes() {
     state.liveError = error?.message || String(error);
   }
   if (!state.cryptoKey) return;
+  // Пока владелец печатает в панели алертов — не перерисовываем. Тик приходит
+  // раз в двадцать секунд и полностью пересобирает строку: набранная наполовину
+  // цена исчезала, а фокус уходил в никуда, то есть ввести уровень было нельзя
+  // в принципе, если печатать медленнее двадцати секунд. Живые числа подождут
+  // до конца ввода — это несравнимо дешевле.
+  if (document.activeElement?.closest?.(".alerts-panel")) {
+    renderLiveNote();
+    return;
+  }
   // Перерисовываем целиком, а не только строки: перекрытие двигает и шапку, и
   // аллокацию, и сверку итогов, и рисовать их из разных перекрытий нельзя.
   renderDashboard(state.snapshot || state.payload);
@@ -331,6 +361,8 @@ async function refreshLiveQuotes() {
 
 function startLiveQuotes() {
   stopLiveQuotes();
+  // Единственное поле, которое оставалось: расшифрованный payload целиком висел
+  // в памяти вкладки после «Закрыть».
   state.snapshot = null;
   if (!state.payload?.liveQuotes?.url) return;
   refreshLiveQuotes();
@@ -347,6 +379,9 @@ function stopLiveQuotes() {
   state.alertKey = null;
   state.alertRules = [];
   state.alertError = null;
+  state.alertsSentAt = 0;
+  state.alertDraft = {};
+  state.alertFocus = null;
   state.liveError = null;
 }
 
@@ -3125,6 +3160,7 @@ function alertsPanelMarkup(row) {
   const section = alertsSection();
   const offline = !section?.writeUrl;
   const failure = state.alertError?.conid === conid ? state.alertError.message : "";
+  const draft = state.alertDraft[conid];
 
   const kinds = [
     ["BUY_BELOW", short ? "Откупить" : "Купить", "цена опустится до"],
@@ -3147,7 +3183,8 @@ function alertsPanelMarkup(row) {
         <div class="alerts-row">
           <input id="alert-value-${escapeHtml(conid)}" class="alerts-input" type="text"
             inputmode="decimal" autocomplete="off"
-            value="${price === null ? "" : escapeHtml(String(price))}"
+            value="${escapeHtml(draft === undefined ? (price === null ? "" : String(price)) : draft)}"
+            data-alert-current-price="${price === null ? "" : escapeHtml(String(price))}"
             data-alert-currency="${escapeHtml(quote.currency || row.currency || "")}" />
           <button type="button" class="alerts-add" ${offline ? "disabled" : ""}>Добавить</button>
         </div>
@@ -3180,7 +3217,7 @@ function alertChipMarkup(rule) {
   else if (blocked) { tone = "is-blocked"; note = `ждёт живой цены (${blocked})`; }
 
   const what = rule.kind === "DATE"
-    ? formatLocalDate(rule.date)
+    ? escapeHtml(formatLocalDate(rule.date))
     : `${rule.kind === "BUY_BELOW" ? "≤" : "≥"} ${escapeHtml(rule.price)}`;
   const label = rule.kind === "DATE" ? "дата" : (rule.kind === "BUY_BELOW" ? "покупка" : "продажа");
 
@@ -3841,6 +3878,8 @@ function renderDashboard(payload) {
   renderRows();
   renderIssues(payload);
   renderLiveNote();
+  // Последним: узлы уже на месте, и курсу есть куда вернуться.
+  restoreAlertFocus();
 }
 
 function showDashboard(payload, key) {
@@ -4330,6 +4369,7 @@ async function commitRules(panel, rules, revert) {
   try {
     await saveAlertRules(rules.map(({ _pending, _failed, ...rule }) => rule));
     state.alertRules = rules.map(({ _pending, _failed, ...rule }) => rule);
+    state.alertsSentAt = Date.now();
     state.alertError = null;
   } catch (error) {
     // Сообщение кладётся в состояние, а не в узел: строка сейчас будет
@@ -4361,8 +4401,12 @@ byId("portfolioBody").addEventListener("click", async (event) => {
     // Предзаполнение снимает большую часть набора: обычно правят одну цифру.
     input.value = kindButton.dataset.alertKind === "DATE"
       ? formatLocalDate(new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10))
-      : input.dataset.alertCurrentPrice || input.value;
+      // dataset.alertCurrentPrice раньше не существовало (в разметке атрибута не
+      // было), поэтому переключение с даты на цену оставляло в поле дату — и
+      // «06.09.2026» уходило в разбор числа как уровень 6.092026.
+      : (input.dataset.alertCurrentPrice || "");
     input.setAttribute("inputmode", kindButton.dataset.alertKind === "DATE" ? "numeric" : "decimal");
+    state.alertDraft[panel.dataset.alertConid] = input.value;
     validateEntry(panel);
     return;
   }
@@ -4390,6 +4434,7 @@ byId("portfolioBody").addEventListener("click", async (event) => {
     // было нарисовать и удалить до того, как ответ вернётся.
     rule.id = `local-${conid}-${kind}-${rule.price || rule.date}`;
     const before = alertRules();
+    delete state.alertDraft[conid];
     if (before.some((item) => item.conid === conid && item.kind === kind
       && (item.price === rule.price) && (item.date === rule.date))) {
       setFeedback(panel, "такое уведомление уже стоит", "is-bad");
@@ -4402,8 +4447,37 @@ byId("portfolioBody").addEventListener("click", async (event) => {
 
 byId("portfolioBody").addEventListener("input", (event) => {
   const panel = alertPanelOf(event.target);
-  if (panel && event.target.classList.contains("alerts-input")) validateEntry(panel);
+  if (!panel || !event.target.classList.contains("alerts-input")) return;
+  state.alertDraft[panel.dataset.alertConid] = event.target.value;
+  state.alertFocus = panel.dataset.alertConid;
+  validateEntry(panel);
 });
+
+byId("portfolioBody").addEventListener("focusin", (event) => {
+  const panel = alertPanelOf(event.target);
+  if (panel && event.target.classList.contains("alerts-input")) {
+    state.alertFocus = panel.dataset.alertConid;
+  }
+});
+
+/**
+ * Вернуть курсор туда, где он был до перерисовки.
+ *
+ * Значение восстанавливается разметкой из черновика, а фокус — здесь: браузер
+ * теряет его вместе с удалённым узлом, и без этого владелец после каждого тика
+ * набирал бы цену в никуда.
+ */
+function restoreAlertFocus() {
+  if (!state.alertFocus) return;
+  const panel = document.querySelector(
+    `.alerts-panel[data-alert-conid="${CSS.escape(state.alertFocus)}"]`,
+  );
+  const input = panel?.querySelector(".alerts-input");
+  if (!input || document.activeElement === input) return;
+  const at = input.value.length;
+  input.focus({ preventScroll: true });
+  try { input.setSelectionRange(at, at); } catch { /* type=date не поддерживает */ }
+}
 
 // Перехватывающего слушателя здесь НЕТ намеренно. Он тут был — чтобы клик по панели
 // не схлопывал строку, — и глушил собственные обработчики этого файла: stopPropagation

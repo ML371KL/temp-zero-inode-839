@@ -1168,6 +1168,16 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
   border-radius: 7px; background: var(--page); color: var(--ink);
   font: 600 12px var(--mono); font-variant-numeric: tabular-nums;
 }
+/* Safari на iOS увеличивает всю страницу при фокусе на поле мельче 16px, и вернуть
+   масштаб пользователю приходится вручную. Поле для ввода цены — единственное на
+   странице, поэтому кегль поднимается только здесь и только на узких экранах. */
+@media (max-width: 620px) {
+  .alerts-input { font-size: 16px; }
+  /* Цель нажатия была 16×13 px. Рекомендуемый минимум — 44 px по большей стороне;
+     здесь компромисс: чип остаётся чипом, но промахнуться уже трудно. */
+  .alert-chip-remove { min-width: 32px; min-height: 32px; font-size: 16px; }
+  .alert-chip { padding: 6px 4px 6px 10px; }
+}
 .alerts-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .alerts-add {
   padding: 6px 11px; border: 1px solid var(--line); border-radius: 7px;

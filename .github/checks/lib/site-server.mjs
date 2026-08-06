@@ -31,6 +31,10 @@ export const PAYLOAD_PATH = "/data/portfolio.enc";
 // scenarios exercise the page's own fetch/decrypt/render path without depending on
 // a network the runner may not have.
 export const LIVE_QUOTES_PATH = "/data/quotes.enc";
+// Куда браузер PUT-ит правила алертов. Тело запоминается: без него проверка могла
+// подтвердить только то, что запись не упала, но не то, ЧТО именно записалось —
+// ошибка в цене или пустое тело проходили все проверки.
+export const ALERTS_SINK_PATH = "/data/alerts-sink";
 
 export async function startSite(root) {
   // The one mutable thing in here. A scenario assigns to `.payload` before navigating
@@ -41,6 +45,8 @@ export async function startSite(root) {
     // check that is not about the live layer is "there is nothing there", and that
     // is exactly the case the page has to survive.
     liveQuotes: { status: 404, body: "not found", type: "text/plain" },
+    alertPuts: [],
+    alertsSinkStatus: 200,
   };
 
   const server = createServer((request, response) => {
@@ -49,6 +55,23 @@ export async function startSite(root) {
     // of the filename answers 404 to every asset the page needs.
     const url = new URL(request.url, "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
+
+    if (pathname === ALERTS_SINK_PATH) {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        state.alertPuts.push({
+          method: request.method,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+        response.writeHead(state.alertsSinkStatus, {
+          "content-type": "text/plain",
+          "cache-control": "no-store",
+        });
+        response.end("ok");
+      });
+      return;
+    }
 
     if (pathname === LIVE_QUOTES_PATH) {
       // The delay exists for one scenario and could not be simulated without it:
@@ -129,6 +152,13 @@ export async function startSite(root) {
         delayMs,
         body: typeof body === "string" ? body : JSON.stringify(body),
       };
+    },
+    alertPuts() {
+      return state.alertPuts;
+    },
+    resetAlertPuts(status = 200) {
+      state.alertPuts = [];
+      state.alertsSinkStatus = status;
     },
     /** Back to "there is nothing there", which is most scenarios' correct state. */
     withdrawLiveQuotes() {
