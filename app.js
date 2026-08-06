@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260806-2";
+} from "./charts.js?v=20260806-3";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -3226,13 +3226,10 @@ function alertChipMarkup(rule) {
     tone = "is-blocked";
     note = "нет котировки — не проверяется";
   }
-  else if (blocked) { tone = "is-blocked"; note = `ждёт живой цены (${blocked})`; }
-  else if (status?.awaitingReset) {
-    // Уровень был пройден уже в момент постановки. Правило ждёт возврата цены
-    // за уровень и до тех пор не сработает — молчать об этом нельзя.
-    tone = "is-blocked";
-    note = "уровень уже пройден — ждёт возврата цены";
-  }
+  // «delayed» здесь больше не появляется: отложенная котировка — настоящая цена,
+  // и правило по ней срабатывает. Остаётся только настоящее молчание фида.
+  else if (blocked) { tone = "is-blocked"; note = `нет свежей цены (${blocked})`; }
+
 
   const what = rule.kind === "DATE"
     ? escapeHtml(formatLocalDate(rule.date))
