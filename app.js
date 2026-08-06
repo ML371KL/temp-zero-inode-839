@@ -19,7 +19,7 @@ import {
   waterfall,
 // Versioned like the <script> and <link> tags in index.html: without it a change to
 // this module alone would keep being served from cache.
-} from "./charts.js?v=20260806-1";
+} from "./charts.js?v=20260806-2";
 
 /*
  * The Content-Security-Policy is delivered in a <meta> tag, and a meta CSP cannot
@@ -3213,8 +3213,26 @@ function alertChipMarkup(rule) {
   let note = "проверяется на сервере";
   if (pending) { tone = "is-pending"; note = "сохраняется…"; }
   else if (failed) { tone = "is-failed"; note = "не сохранён — повторить"; }
+  else if (status?.notifyFailedAt) {
+    // Недоставленное уведомление отдельным состоянием: правило сработало, но
+    // владелец об этом не узнал, и сервер будет пробовать снова.
+    tone = "is-failed";
+    note = "сработал, уведомление не дошло — повтор";
+  }
   else if (fired) { tone = "is-fired"; note = `сработал ${formatDateShort(fired, "time")}`; }
+  else if (blocked === "no-quote") {
+    // Инструмент, которому котировка не приходит вовсе. Раньше такой чип
+    // выглядел как рабочий, хотя не проверялся ничем и никогда.
+    tone = "is-blocked";
+    note = "нет котировки — не проверяется";
+  }
   else if (blocked) { tone = "is-blocked"; note = `ждёт живой цены (${blocked})`; }
+  else if (status?.awaitingReset) {
+    // Уровень был пройден уже в момент постановки. Правило ждёт возврата цены
+    // за уровень и до тех пор не сработает — молчать об этом нельзя.
+    tone = "is-blocked";
+    note = "уровень уже пройден — ждёт возврата цены";
+  }
 
   const what = rule.kind === "DATE"
     ? escapeHtml(formatLocalDate(rule.date))
