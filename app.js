@@ -54,6 +54,12 @@ const LIVE_QUOTES_REFRESH_MS = 20_000;
 // Не «показать посерее»: цена, помеченная как живая и отставшая на десять минут,
 // хуже отсутствия живого слоя, потому что по ней принимают решение.
 const LIVE_QUOTES_MAX_AGE_MS = 4 * 60 * 1000;
+// Как часто вкладка вправе перечитывать снимок, увидев, что перекрытие посчитано для
+// другого поколения. Реже тика живого слоя и много реже такта конвейера: отставший на
+// поколение сайт иначе перекачивал бы payload каждые двадцать секунд, ничего этим не
+// добившись, — а одной минуты хватает, чтобы догнать публикацию, как только она
+// доехала.
+const PAYLOAD_RELOAD_MIN_INTERVAL_MS = 60_000;
 
 const state = {
   envelope: null,
@@ -98,6 +104,8 @@ const state = {
   alertFocus: null,
   liveError: null,
   liveTimer: null,
+  // Когда вкладка последний раз перечитывала снимок, догоняя поколение сервера.
+  payloadReloadAt: 0,
 };
 
 /* ------------------------------------------------------------ live quotes --- */
@@ -344,6 +352,9 @@ async function refreshLiveQuotes() {
     state.liveQuotes = null;
     state.liveError = error?.message || String(error);
   }
+  // До отрисовки: если сервер ушёл на новое поколение снимка, догоняем его здесь, и
+  // рисуется уже совпавшая пара. Функция не бросает и не чаще раза в минуту работает.
+  await reloadPayloadIfSuperseded();
   if (!state.cryptoKey) return;
   // Пока владелец печатает в панели алертов — не перерисовываем. Тик приходит
   // раз в двадцать секунд и полностью пересобирает строку: набранная наполовину
@@ -357,6 +368,44 @@ async function refreshLiveQuotes() {
   // Перерисовываем целиком, а не только строки: перекрытие двигает и шапку, и
   // аллокацию, и сверку итогов, и рисовать их из разных перекрытий нельзя.
   renderDashboard(state.snapshot || state.payload);
+}
+
+/**
+ * Догнать снимок, если сервер посчитал перекрытие для другого поколения.
+ *
+ * Сервер сообщает это сам: перекрытие несёт отпечаток payload, для которого сделано,
+ * и `overlayForPayload` сверяет его с тем, что держит вкладка. Раньше несовпадение
+ * просто гасило живой слой — цены молча становились ценами снимка, и вернуть их можно
+ * было только кнопкой «Обновить». А снимок вкладка читала ровно дважды: при вводе
+ * пароля и по этой кнопке. Значит на первом же такте конвейера — не позже чем через
+ * полчаса после открытия — живые цены выключались у любой оставленной открытой
+ * вкладки, и 6 августа это выглядело как «панель показывает вчерашнее закрытие».
+ *
+ * Ключ уже в памяти, поэтому перечитывание не стоит владельцу ни второго ввода пароля,
+ * ни лишней итерации PBKDF2.
+ */
+async function reloadPayloadIfSuperseded() {
+  const theirs = String(state.liveQuotes?.overlay?.basedOn?.generatedAt || "");
+  const ours = String((state.snapshot || state.payload)?.generatedAt || "");
+  if (!theirs || !ours || theirs === ours) return;
+  const now = Date.now();
+  if (state.payloadReloadAt && now - state.payloadReloadAt < PAYLOAD_RELOAD_MIN_INTERVAL_MS) return;
+  state.payloadReloadAt = now;
+  if (!state.cryptoKey) return;
+  try {
+    await loadEnvelope({ bypassCache: true });
+    // Тот же порядок, что у кнопки и у тика: всякий, кто вернулся из await, обязан
+    // заново проверить блокировку, иначе снимок дорисуется в уже очищенный DOM.
+    if (!state.cryptoKey) return;
+    const payload = await decryptEnvelope(state.envelope, state.cryptoKey);
+    if (!state.cryptoKey) return;
+    renderDashboard(payload);
+  } catch (error) {
+    // Неудачное перечитывание не гасит живой слой: на экране остаётся прежний снимок,
+    // перекрытие к нему всё равно не подойдёт — то есть ровно то поведение, что было
+    // до этой функции, и ни на шаг хуже.
+    state.liveError = error?.message || String(error);
+  }
 }
 
 function startLiveQuotes() {

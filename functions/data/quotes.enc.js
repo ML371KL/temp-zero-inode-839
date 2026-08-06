@@ -1,0 +1,49 @@
+/**
+ * `/data/quotes.enc` — живой слой котировок, тоже из R2 и тоже со своего origin.
+ *
+ * Адрес, по которому страница его просит, приходит внутри расшифрованного payload
+ * (`LIVE_QUOTES_URL` у конвейера), поэтому переезд сюда — это правка одной переменной
+ * окружения на сервере, а не кода страницы.
+ *
+ * Зачем переезжать, если публичный адрес бакета работал: этот объект запрашивается
+ * каждые двадцать секунд каждой открытой вкладкой — самый частый запрос во всей
+ * системе, и ровно тот случай, против которого Cloudflare ограничивает `r2.dev` и
+ * называет его путём для разработки. Со своего origin ограничения нет, CORS не нужен,
+ * а из CSP уходит внешний хост.
+ *
+ * Ключи здесь по-прежнему не лежат: объект зашифрован тем же ключом, что и payload,
+ * ключ приходит внутри payload, а payload открывается паролем владельца.
+ */
+
+export async function onRequestGet({ env, request }) {
+  const object = await env.DATA.get("quotes.enc", { onlyIf: request.headers });
+
+  if (object === null) {
+    // Живой слой необязателен: страница переживает его отсутствие и говорит об этом
+    // строкой. Явный JSON, чтобы она сказала именно это, а не «конверт не разобрался».
+    return new Response(
+      JSON.stringify({ error: "the live quote layer has not been published yet" }),
+      {
+        status: 503,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      },
+    );
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("content-type", "application/json; charset=utf-8");
+  // Агент переписывает объект чаще, чем истёк бы любой кэш; страница и так просит без
+  // кэша. Единственный честный ответ на «какая сейчас цена» — тот, что пришёл сейчас.
+  headers.set("cache-control", "no-store");
+  if (object.uploaded) headers.set("x-quotes-uploaded", object.uploaded.toISOString());
+
+  if (!("body" in object) || object.body === null) {
+    return new Response(null, { status: 304, headers });
+  }
+  return new Response(object.body, { headers });
+}

@@ -20,3 +20,7 @@ data/portfolio.enc
 # directory. In a public repository that is a small, permanent leak for no benefit.
 __pycache__/
 *.pyc
+
+# Локальный кэш wrangler и каталог сборки публикации — рабочее состояние, не код.
+.wrangler/
+site/

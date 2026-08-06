@@ -1,0 +1,86 @@
+name: Publish the site to Cloudflare Pages
+
+# The site publishes only when the site changes. The payload does not travel this way
+# any more: the pipeline writes it straight into the bucket and
+# `functions/data/portfolio.enc.js` serves it from there, so the half-hourly tick costs
+# one PUT instead of one deployment. It used to cost a deployment — forty-eight a day
+# against a free ceiling of five hundred a month — and on 6 August GitHub's Pages queue
+# crossed its ten-minute cap and every one of those failed for four hours.
+#
+# The gate stays exactly what it was: nothing reaches the live page that the browser
+# checks have not passed on. `workflow_run` fires on completion, success or not, so the
+# conclusion is tested in the job below; and because the filter matches the triggering
+# run's `head_branch` — a string a fork controls — the job also tests that the run came
+# from a push to this repository. This page is where the owner types the payload
+# password, so a fork's commit reaching it would not be defacement but credential
+# capture.
+
+on:
+  workflow_run:
+    workflows: ["Frontend checks"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name != 'workflow_run'
+      || (
+        github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_repository.full_name == github.repository
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Pinned to full commit SHAs. This job can publish the page, so a moved tag on
+      # any action here would be a change to the live site that no review would see.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The commit the checks actually passed on, not whatever `main` has become in
+          # the meantime — otherwise the site deployed is code no browser ever saw.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Stage the site
+        run: |
+          set -euo pipefail
+          rm -rf site && mkdir -p site
+          # Explicit list rather than "everything": the repository root also holds the
+          # README and the workflow directory, and a deployment is not the place to
+          # discover that something new landed beside them.
+          cp index.html app.js charts.js styles.css robots.txt site/
+          ls -la site
+
+      - name: Publish
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4.119.0 pages deploy site \
+            --project-name tzi-839 \
+            --branch main \
+            --commit-dirty=true
+
+      - name: Check that what was published answers
+        run: |
+          set -euo pipefail
+          # With retries: a deployment reaches the edge in a moment, not instantly, and
+          # a single curl would go red for nothing more than a slow network.
+          for attempt in 1 2 3 4 5 6; do
+            page=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/ || true)
+            data=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/data/portfolio.enc || true)
+            echo "attempt $attempt: page $page, payload $data"
+            if [ "$page" = "200" ] && [ "$data" = "200" ]; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::the published site does not answer 200 on / and /data/portfolio.enc"
+          exit 1
