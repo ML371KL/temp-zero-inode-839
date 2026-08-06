@@ -73,6 +73,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    # The deploy below waits up to thirty minutes, so the runner has to outlive it. A
+    # job with no cap at all is the other failure: `concurrency.cancel-in-progress`
+    # only kills this run when the *next* payload tick arrives, and a deployment that
+    # hangs between ticks would otherwise hold the environment for six hours.
+    timeout-minutes: 40
     steps:
       # Pinned to full commit SHAs. This job holds `pages: write` and `id-token: write`,
       # so a moved tag on any of these actions would be a deployment-capable change to
@@ -162,3 +167,13 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        with:
+          # Thirty minutes, not the default ten. Ten is not an estimate of how long
+          # publishing takes — it is the point at which this action gives up and
+          # cancels the deployment. On 6 August GitHub's Pages queue crossed it and
+          # every half-hourly tick failed there for four hours; several of those
+          # cancelled deployments still reached the CDN a minute or two later, which
+          # is worse than either outcome on its own: the run says the payload did not
+          # publish, the site says it did, and there is no way to tell from the run
+          # which happened. Waiting longer costs runner minutes and nothing else.
+          timeout: 1800000
