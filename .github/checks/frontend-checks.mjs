@@ -1287,11 +1287,45 @@ async function checkAlertsPanel(ctx) {
         if (!seen.chips.some((text) => text.includes("123,45") || text.includes("123.45"))) {
           failures.push(`long: the server's rule is not drawn — ${JSON.stringify(seen.chips)}`);
         }
-        if (!seen.notes.some((text) => /сервер/.test(text))) {
-          failures.push(`long: a stored rule does not say it is checked on the server — ${JSON.stringify(seen.notes)}`);
+        // Раньше здесь стоял греп по слову «сервер». Он проходил одинаково и на
+        // «правило проверяется», и на «сервер о нём не знает» — то есть ровно на тех
+        // двух состояниях, ради различения которых эта заметка и существует, и ровно
+        // так 6 августа девять часов выглядели рабочими чипы, не проверявшиеся ничем.
+        if (!seen.notes.some((text) => /активен/i.test(text))) {
+          failures.push(`long: a rule the server confirms does not read as active — ${JSON.stringify(seen.notes)}`);
         }
       }
       failures.push(...consoleFailures(session).map((item) => `panel: ${item}`));
+    } finally {
+      await session.close();
+    }
+  }
+
+  // (a2) Та же самая карточка, но сервер о правиле молчит: состояние пустое. Заметка
+  // ОБЯЗАНА отличаться от рабочей. Это второй половина проверки выше и главная из
+  // двух: «выглядит поставленным, но не проверяется» — единственный отказ этой
+  // панели, который владелец не в состоянии заметить сам.
+  {
+    const session = await openPage(ctx.browser);
+    try {
+      ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+      ctx.site.serveLiveQuotes(await encryptLiveQuotes(snapshot({
+        rules: [{ id: "r1", conid: String(long.conid), kind: "SELL_ABOVE", price: "123.45" }],
+        state: {}, writeUrl: `${ctx.site.origin}/alerts-sink`,
+      }), key));
+      await goto(session.page, ctx.site.origin);
+      await unlock(session.page, ctx.password);
+      await new Promise((r) => setTimeout(r, 900));
+
+      await open(session.page, long);
+      const notes = await session.page.$$eval(".alert-chip-note",
+        (nodes) => nodes.map((n) => n.textContent.trim())).catch(() => []);
+      if (!notes.length) {
+        failures.push("unconfirmed: the rule is not drawn at all");
+      } else if (notes.some((text) => /активен/i.test(text))) {
+        failures.push(`unconfirmed: a rule the server says nothing about reads as active — ${JSON.stringify(notes)}`);
+      }
+      failures.push(...consoleFailures(session).map((item) => `unconfirmed: ${item}`));
     } finally {
       await session.close();
     }
