@@ -40,7 +40,15 @@ export async function onRequestGet({ env, request }) {
   // Агент переписывает объект чаще, чем истёк бы любой кэш; страница и так просит без
   // кэша. Единственный честный ответ на «какая сейчас цена» — тот, что пришёл сейчас.
   headers.set("cache-control", "no-store");
-  if (object.uploaded) headers.set("x-quotes-uploaded", object.uploaded.toISOString());
+  // Last-Modified, а не только собственный заголовок. Это стандартный признак возраста
+  // публикации, и его отсутствие — не мелочь: канарейка 839 определяет по нему, не встал ли
+  // публикатор, и без него отказывается выносить вердикт вовсе, чтобы остановившаяся
+  // публикация не пряталась за неполным заголовком. `writeHttpMetadata` его не пишет — она
+  // переносит только httpMetadata объекта, а время выгрузки лежит отдельным полем.
+  if (object.uploaded) {
+    headers.set("x-quotes-uploaded", object.uploaded.toISOString());
+    headers.set("last-modified", object.uploaded.toUTCString());
+  }
 
   if (!("body" in object) || object.body === null) {
     return new Response(null, { status: 304, headers });
