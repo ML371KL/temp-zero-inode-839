@@ -1205,6 +1205,13 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .alert-chip.is-fired { border-color: var(--positive); }
 .alert-chip.is-fired .alert-chip-note { color: var(--positive); }
 .alert-chip.is-blocked .alert-chip-note { color: var(--warning); }
+/* Ожидание — не отказ, и цвета у них разные. `is-waiting` — это закрытая биржа и
+   бумага, по которой сегодня не торговали: система исправна, новостей нет. Красить
+   их предупреждающим жёлтым, как раньше, значило приучать не смотреть на жёлтое —
+   и тогда оно перестаёт работать ровно там, где означает настоящую поломку. Тон
+   приглушённый: строка остаётся читаемой, но взгляд не притягивает. */
+.alert-chip.is-waiting .alert-chip-note { color: var(--ink-3); }
+.alert-chip.is-waiting { opacity: 0.85; }
 .alert-chip-remove {
   padding: 0 4px; border: 0; background: none; color: var(--ink-3);
   cursor: pointer; font-size: 13px; line-height: 1;
