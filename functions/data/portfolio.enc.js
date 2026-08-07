@@ -22,6 +22,8 @@
  * забирает.
  */
 
+import { bodilessStatus } from "../../lib/conditional-requests.js";
+
 export async function onRequestGet({ env, request }) {
   const object = await env.DATA.get("portfolio.enc", { onlyIf: request.headers });
 
@@ -57,7 +59,9 @@ export async function onRequestGet({ env, request }) {
   }
 
   if (!("body" in object) || object.body === null) {
-    return new Response(null, { status: 304, headers });
+    // 304 говорит «твоя копия актуальна». Клиенту, пришедшему с If-Match, эта фраза
+    // не подходит: копии у него нет, а условие не выполнено — это 412. См. модуль.
+    return new Response(null, { status: bodilessStatus(request, object), headers });
   }
   return new Response(object.body, { headers });
 }
