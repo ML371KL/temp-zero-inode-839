@@ -55,3 +55,13 @@ export async function onRequestGet({ env, request }) {
   }
   return new Response(object.body, { headers });
 }
+
+// HEAD — это GET без тела, и обслуживать его обязана та же функция. Без этого экспорта
+// Pages не находит обработчика на метод и уходит к статике, а та на неизвестный путь
+// отвечает 200 и HTML главной страницы. Сторож свежести, спрашивающий Last-Modified
+// именно методом HEAD, получал заглушку и объявлял живую панель мёртвой — проверено
+// на себе в первый же прогон.
+export async function onRequestHead(context) {
+  const response = await onRequestGet(context);
+  return new Response(null, { status: response.status, headers: response.headers });
+}
