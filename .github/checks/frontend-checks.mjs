@@ -1606,6 +1606,201 @@ async function checkAuditGaps(ctx) {
   );
 }
 
+/**
+ * Ряд фильтров: постоянные подписи, множественный выбор, уведомления.
+ *
+ * Проверяется не «фильтр что-то фильтрует», а три обещания, которые легко нарушить
+ * незаметно. Подпись фильтра ПОСТОЯННА — стоило ей начать показывать выбранное, как
+ * она разрасталась до «Опционы + Акции и ETF» и тащила за собой соседние кнопки, ради
+ * чего слоту держали фиксированную ширину; выбор виден каёмкой, а не текстом. Выбор
+ * МНОЖЕСТВЕННЫЙ — и здесь мало увидеть два флажка: период не просто отбирает строки,
+ * он пересчитывает под себя каждую цифру, поэтому два года обязаны давать в точности
+ * объединение того, что дают эти годы по одному. И фильтр уведомлений отбирает по
+ * слою, которого в строке payload нет вовсе.
+ */
+async function checkFilterRow(ctx) {
+  const failures = [];
+  const rows = (ctx.payload.rows || []).filter((row) => row.conid);
+  const key = liveQuotesKey();
+  const withLayer = {
+    ...ctx.payload,
+    liveQuotes: {
+      schemaVersion: 1, url: `${ctx.site.origin}/data/quotes.enc`,
+      algorithm: "AES-GCM", aad: "temp-zero-inode-839:quotes:v1",
+      key: Buffer.from(key).toString("base64"),
+    },
+  };
+  // Правила на два РАЗНЫХ инструмента и разного вида: иначе выбор «Продать» и выбор
+  // «На дату» дали бы один и тот же ответ, и проверка прошла бы на сломанном отборе.
+  const [sellRow, dateRow] = [rows[0], rows[1]];
+  const alerts = {
+    rules: [
+      { id: "f-sell", conid: String(sellRow.conid), kind: "SELL_ABOVE", price: "999" },
+      { id: "f-date", conid: String(dateRow.conid), kind: "DATE", date: "2030-01-01" },
+    ],
+    state: {},
+    writeUrl: `${ctx.site.origin}/alerts-sink`,
+  };
+  const liveSnapshot = {
+    schemaVersion: 1, generatedAt: new Date().toISOString(),
+    quotes: {},
+    overlay: { schemaVersion: 1, basedOn: { generatedAt: ctx.payload.generatedAt }, rows: {}, totals: {} },
+    alerts,
+  };
+
+  const FILTERS = ["assetScope", "alertScope", "directionScope", "currencyScope", "resultScope", "periodScope"];
+  const LABELS = ["Инструменты", "Уведомления", "Направление", "Валюта", "Результат", "Период"];
+
+  const session = await openPage(ctx.browser);
+  try {
+    ctx.site.serve(await encryptEnvelope(ctx.envelope, withLayer, ctx.password));
+    ctx.site.serveLiveQuotes(await encryptLiveQuotes(liveSnapshot, key));
+    await goto(session.page, ctx.site.origin);
+    await unlock(session.page, ctx.password);
+    await sleep(900);
+
+    const readLabels = () => session.page.$$eval(
+      ".select-filters .scope-filter > summary > span",
+      (nodes) => nodes.map((node) => node.textContent.trim()),
+    );
+    const readNarrowed = () => session.page.$$eval(
+      ".select-filters .scope-filter > summary",
+      (nodes) => nodes.map((node) => node.classList.contains("is-narrowed")),
+    );
+    const readRowKeys = () => session.page.$$eval(
+      "tr.data-row",
+      (nodes) => nodes.map((node) => node.dataset.rowKey).filter(Boolean),
+    );
+    const optionsOf = (id) => session.page.$$eval(
+      `#${id}Options input[type=checkbox]`,
+      (boxes) => boxes.map((box) => box.value),
+    );
+    const pick = async (id, values) => {
+      await session.page.evaluate((filterId, picked) => {
+        const boxes = [...document.querySelectorAll(`#${filterId}Options input[type=checkbox]`)];
+        for (const box of boxes) box.checked = picked.includes(box.value);
+        // Одно всплывающее событие: страница слушает контейнер, а не каждый флажок.
+        boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
+      }, id, values);
+      await sleep(SETTLE_MS);
+    };
+    const resetAll = async () => {
+      await session.page.click("#resetFilters");
+      await sleep(SETTLE_MS);
+    };
+
+    /* 1. Порядок и постоянство подписей. */
+    const labelsBefore = await readLabels();
+    if (labelsBefore.join("|") !== LABELS.join("|")) {
+      failures.push(`подписи фильтров: [${labelsBefore}] вместо [${LABELS}]`);
+    }
+    const missing = [];
+    for (const id of FILTERS) {
+      if (!(await session.page.$(`#${id}`))) missing.push(id);
+    }
+    if (missing.length) failures.push(`нет фильтров: ${missing.join(", ")}`);
+
+    /* 2. Выбор виден каёмкой и НЕ трогает подпись — у КАЖДОГО фильтра.
+       Именно «у каждого»: первая редакция проверки смотрела только первый, а он
+       единственный перерисовывает себя сам (его `after` трогает всю страницу).
+       У остальных пяти каёмка не загоралась вовсе — сужение работало, а признака
+       сужения на экране не было, и проверка это пропустила. */
+    for (const [index, id] of FILTERS.entries()) {
+      const options = await optionsOf(id);
+      if (options.length < 2) {
+        failures.push(`${id}: в фикстуре ${options.length} вариант(ов), сужение проверить нечем`);
+        continue;
+      }
+      await pick(id, [options[0]]);
+      const labelsAfter = await readLabels();
+      if (labelsAfter.join("|") !== LABELS.join("|")) {
+        failures.push(`${id}: подпись изменилась после выбора — [${labelsAfter}]`);
+      }
+      const narrowed = await readNarrowed();
+      if (!narrowed[index]) failures.push(`${id}: сужение не подсвечено каёмкой`);
+      if (narrowed.filter(Boolean).length !== 1) {
+        failures.push(`${id}: подсветились и фильтры, в которых ничего не выбирали`);
+      }
+      // Кнопка «Выбрать все» показывается ровно при сужении: она и есть путь назад.
+      const allVisible = await session.page.$eval(`#${id}All`, (node) => !node.hidden);
+      if (!allVisible) failures.push(`${id}: при сужении не предложена кнопка «Выбрать все»`);
+      await resetAll();
+      if ((await readNarrowed()).some(Boolean)) failures.push(`${id}: сброс не снял подсветку`);
+    }
+
+    /* 3. Уведомления: слой, которого в строке payload нет. */
+    const allKeys = await readRowKeys();
+    await pick("alertScope", ["SELL_ABOVE"]);
+    const sellKeys = await readRowKeys();
+    if (sellKeys.length !== 1 || sellKeys[0] !== sellRow.rowId) {
+      failures.push(`«Продать»: показаны [${sellKeys}], ожидалась одна строка ${sellRow.rowId}`);
+    }
+    await pick("alertScope", ["DATE"]);
+    const dateKeys = await readRowKeys();
+    if (dateKeys.length !== 1 || dateKeys[0] !== dateRow.rowId) {
+      failures.push(`«На дату»: показаны [${dateKeys}], ожидалась одна строка ${dateRow.rowId}`);
+    }
+    // Два вида сразу — объединение, а не пересечение. Пересечение здесь пусто, и
+    // ошибка выглядела бы как «фильтр работает, просто ничего не нашлось».
+    await pick("alertScope", ["SELL_ABOVE", "DATE"]);
+    const bothKeys = await readRowKeys();
+    if (bothKeys.length !== 2) {
+      failures.push(`два вида уведомлений дали ${bothKeys.length} строк вместо двух — выбор читается как пересечение`);
+    }
+    await resetAll();
+    if ((await readRowKeys()).length !== allKeys.length) failures.push("сброс не вернул все строки");
+
+    /* 4. Период: два года обязаны дать объединение того, что дают годы по одному. */
+    const years = await optionsOf("periodScope");
+    if (years.length < 2) {
+      failures.push(`в фикстуре ${years.length} года — множественный период проверить нечем`);
+    } else {
+      const [first, second] = years;
+      await pick("periodScope", [first]);
+      const one = await readRowKeys();
+      await pick("periodScope", [second]);
+      const two = await readRowKeys();
+      await pick("periodScope", [first, second]);
+      const together = await readRowKeys();
+      const union = [...new Set([...one, ...two])].sort();
+      if (together.slice().sort().join(",") !== union.join(",")) {
+        failures.push(
+          `период ${first}+${second} дал [${together.sort()}], а объединение годов по одному — [${union}]`,
+        );
+      }
+      const note = await session.page.$eval("#kpiContext", (node) => node.textContent.trim());
+      if (!note.includes(first) || !note.includes(second)) {
+        failures.push(`строка итогов не называет оба выбранных года: «${note}»`);
+      }
+      await resetAll();
+    }
+
+    /* 5. Результат: прибыльные и убыточные вместе — это всё, кроме нуля. */
+    await pick("resultScope", ["profit"]);
+    const profitKeys = await readRowKeys();
+    await pick("resultScope", ["loss"]);
+    const lossKeys = await readRowKeys();
+    await pick("resultScope", ["profit", "loss"]);
+    const eitherKeys = await readRowKeys();
+    if (eitherKeys.length !== new Set([...profitKeys, ...lossKeys]).size) {
+      failures.push("«Прибыльные + Убыточные» не равно объединению того и другого");
+    }
+    if (profitKeys.some((keyId) => lossKeys.includes(keyId))) {
+      failures.push("строка попала и в прибыльные, и в убыточные");
+    }
+    await resetAll();
+
+    failures.push(...consoleFailures(session));
+  } finally {
+    await session.close();
+  }
+  ctx.report.record(
+    "фильтры: подписи постоянны, выбор множественный, уведомления отбирают",
+    failures,
+    `${FILTERS.length} фильтров`,
+  );
+}
+
 async function checkXss(ctx) {
   const session = await openPage(ctx.browser);
   const failures = [];
@@ -1850,6 +2045,7 @@ async function main() {
     await checkLiveLayer(ctx);
     await checkLastExitTile(ctx);
     await checkAlertsPanel(ctx);
+    await checkFilterRow(ctx);
     await checkAuditGaps(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);

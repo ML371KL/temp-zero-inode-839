@@ -1035,11 +1035,13 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 /* The label is its own element so it can be clipped: `text-overflow` does nothing to
    the anonymous box a flex container wraps bare text in, and the class names ran
    straight under the chevron. */
-/* A fixed width, not a maximum. The whole filter group is pushed against the right
-   edge, so anything that changes width in it drags every control beside it sideways —
-   which is what the reset button used to do by appearing, and what the class list
-   would do again every time the selection changed the label. */
-.scope-filter > summary { display: flex; align-items: center; width: 188px; cursor: pointer; list-style: none; }
+/* Ширина по содержимому — и это следствие того, что подпись перестала меняться.
+   Раньше здесь стояла фиксированная ширина 188px, и не из вкуса: группа фильтров
+   прижата к правому краю, поэтому всё, что меняет ширину внутри неё, тащит соседние
+   кнопки вбок, — а подпись менялась на каждом выборе («Опционы + Акции и ETF» вместо
+   «Инструменты»). Постоянная подпись убирает причину, а вместе с ней и фиксированный
+   слот: шесть фильтров по 188px не поместились бы в ряд ни на одном экране. */
+.scope-filter > summary { display: flex; align-items: center; max-width: 188px; cursor: pointer; list-style: none; }
 .scope-filter > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scope-filter > summary::-webkit-details-marker { display: none; }
 .scope-filter[open] > summary { border-color: var(--accent); color: var(--ink-1); }
@@ -1057,6 +1059,10 @@ tbody tr.data-row:focus-visible { outline-offset: -2px; }
 .scope-option:hover { background: var(--surface-sunken); }
 .scope-option input { margin: 0; }
 .scope-filter .ghost-button { width: 100%; }
+/* Фильтр, которому нечего предложить: валюты и годы берутся из payload, и до его
+   загрузки — а также под замком — списки пусты. Пустое меню без единого слова
+   читается как поломка, поэтому оно говорит, что пусто. */
+.scope-empty { margin: 0 0 9px; padding: 5px 6px; color: var(--ink-3); font-size: 13px; }
 
 @media (max-width: 830px) {
   /* Below 830 the filter row no longer fits its panel as a desktop row: at 800 it

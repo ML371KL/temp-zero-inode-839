@@ -232,24 +232,56 @@
               <button id="quickTabClosed" type="button" data-tab="closed" role="tab" aria-selected="false" aria-controls="instrumentsTable" tabindex="-1">Закрытые</button>
               <button id="quickTabReview" type="button" data-tab="review" role="tab" aria-selected="false" aria-controls="instrumentsTable" tabindex="-1">Проверить</button>
             </div>
+            <!-- Шесть фильтров одного устройства: <details> с флажками внутри.
+                 Название КАЖДОГО постоянно и не зависит от выбора — «Опционы + Акции и
+                 ETF» разрасталось до полуслова на кнопку, а раз подпись менялась, слот
+                 приходилось держать фиксированной ширины, чтобы соседи не прыгали.
+                 Постоянная подпись снимает и то и другое: выбор виден подсвеченной
+                 каёмкой, а ширину каждый берёт по своему слову. Что именно выбрано,
+                 печатается под таблицей в строке «Итоги по выбранным инструментам». -->
             <div class="select-filters">
               <details id="assetScope" class="scope-filter">
-                <summary aria-label="Классы активов"><span id="assetScopeSummary">Все классы</span></summary>
+                <summary aria-label="Инструменты"><span>Инструменты</span></summary>
                 <div class="scope-menu">
                   <div id="assetScopeOptions" class="scope-options"></div>
                   <button id="assetScopeAll" class="ghost-button" type="button">Выбрать все</button>
                 </div>
               </details>
-              <select id="directionFilter" aria-label="Направление">
-                <option value="">Long + Short</option><option value="LONG">Long</option><option value="SHORT">Short</option>
-              </select>
-              <select id="currencyFilter" aria-label="Валюта"><option value="">Все валюты</option></select>
-              <select id="profitFilter" aria-label="Результат">
-                <option value="">Любой итог</option><option value="profit">Прибыльные</option><option value="loss">Убыточные</option>
-              </select>
-              <select id="yearFilter" aria-label="Год" title="Показывает, что инструмент сделал за один календарный год: реализованное, дивиденды и итог считаются только по событиям этого года. Дивиденды и налог с них отнесены к году по дате отсечки, а не по дате выплаты — так же, как в блоках «Дивиденды и проценты» и «Результат нарастающим итогом»">
-                <option value="">Любой год</option>
-              </select>
+              <details id="alertScope" class="scope-filter">
+                <summary aria-label="Уведомления" title="Инструменты, на которые выставлены уведомления о цене или дате"><span>Уведомления</span></summary>
+                <div class="scope-menu">
+                  <div id="alertScopeOptions" class="scope-options"></div>
+                  <button id="alertScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
+              <details id="directionScope" class="scope-filter">
+                <summary aria-label="Направление"><span>Направление</span></summary>
+                <div class="scope-menu">
+                  <div id="directionScopeOptions" class="scope-options"></div>
+                  <button id="directionScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
+              <details id="currencyScope" class="scope-filter">
+                <summary aria-label="Валюта"><span>Валюта</span></summary>
+                <div class="scope-menu">
+                  <div id="currencyScopeOptions" class="scope-options"></div>
+                  <button id="currencyScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
+              <details id="resultScope" class="scope-filter">
+                <summary aria-label="Результат"><span>Результат</span></summary>
+                <div class="scope-menu">
+                  <div id="resultScopeOptions" class="scope-options"></div>
+                  <button id="resultScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
+              <details id="periodScope" class="scope-filter">
+                <summary aria-label="Период" title="Показывает, что инструмент сделал за выбранные календарные годы: реализованное, дивиденды и итог считаются только по событиям этих лет. Дивиденды и налог с них отнесены к году по дате отсечки, а не по дате выплаты — так же, как в блоках «Дивиденды и проценты» и «Результат нарастающим итогом»"><span>Период</span></summary>
+                <div class="scope-menu">
+                  <div id="periodScopeOptions" class="scope-options"></div>
+                  <button id="periodScopeAll" class="ghost-button" type="button">Выбрать все</button>
+                </div>
+              </details>
               <button id="resetFilters" class="ghost-button" type="button" disabled>Сбросить</button>
             </div>
           </div>

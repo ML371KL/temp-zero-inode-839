@@ -79,6 +79,11 @@ const state = {
   // Which asset classes the whole page is about. Empty means every class; the
   // selection is restored from localStorage on load.
   assetScope: new Set(),
+  // Остальные пять множественных выборов. Пустое множество означает «всё», ровно как
+  // у assetScope, — но, в отличие от него, эти пять НЕ запоминаются между сессиями и
+  // НЕ трогают ничего, кроме таблицы и её итогов. Класс активов задаёт, про что вся
+  // страница целиком (шапка, графики, доходность счёта); валюта или год — только срез.
+  picks: { alert: new Set(), direction: new Set(), currency: new Set(), result: new Set(), period: new Set() },
   // Conids the pipeline refused to put in its own totals. Rebuilt from every payload.
   quarantined: new Set(),
   // Живой слой. Держится ОТДЕЛЬНО от payload и никогда в него не вписывается:
@@ -1262,18 +1267,21 @@ function filterContext(rows) {
   if (tabLabels[state.activeTab]) parts.push(tabLabels[state.activeTab]);
   const search = byId("searchInput").value.trim();
   if (search) parts.push(`поиск «${search}»`);
-  for (const id of ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]) {
-    const select = byId(id);
-    if (select.value) parts.push(select.selectedOptions[0]?.textContent || select.value);
+  // Подписи фильтров постоянны, поэтому выбранное печатается здесь: это единственное
+  // место, где видно, что именно сузило показ, и оно же считает строки.
+  for (const def of MULTI_FILTERS) {
+    if (def.id === "assetScope") continue;
+    const label = multiFilterLabel(def);
+    if (label) parts.push(label);
   }
   if (scopeNarrowed()) parts.unshift(scopeLabel());
   return `${rows.length} из ${total}${parts.length ? ` · ${parts.join(" · ")}` : " · все инструменты"}`;
 }
 
 function isFiltered(rows) {
-  // A year can leave the row count untouched while changing every figure in them, so
-  // the count alone cannot decide whether these totals are comparable to the payload's.
-  if (byId("yearFilter").value) return true;
+  // Период может не тронуть число строк и при этом изменить в них каждую цифру, так
+  // что счётчик строк один не решает, сравнимы ли эти итоги с итогами payload.
+  if (state.picks.period.size) return true;
   // Against the trusted rows, because that is what was summed: the published totals
   // leave the quarantined instruments out, so an unfiltered page is one whose sum
   // covers every row the pipeline itself counted.
@@ -1288,20 +1296,20 @@ function renderKpis(payload, rows) {
   // Under a year the three position cards have nothing to add up: the rows carry no
   // market value, basis or unrealised, because those describe today and belong to no
   // year. Zero would read as "worth nothing" rather than "does not apply".
-  const year = byId("yearFilter").value;
-  const position = (value, note) => (year ? [null, "не относится к году"] : [value, note]);
+  const period = multiFilterLabel(filterById("periodScope"));
+  const position = (value, note) => (period ? [null, "не относится к периоду"] : [value, note]);
   const cards = [
     ["Рыночная стоимость", ...position(totals.marketValueUsd, "Открытые позиции")],
     ["Себестоимость, AVCO", ...position(totals.openBasisUsd, "По курсам на дату покупки")],
     ["Нереализованный P&L", ...position(totals.unrealizedPnlUsd, "Текущий")],
-    ["Реализованный P&L", totals.realizedPnlUsd, year ? `Закрыто в ${year}` : "Закрытые объёмы"],
-    // By ex-date, the same rule `projectRowToYear` files the event under and the same
+    ["Реализованный P&L", totals.realizedPnlUsd, period ? `Закрыто в ${period}` : "Закрытые объёмы"],
+    // By ex-date, the same rule `projectRowToYears` files the event under and the same
     // one the income block and the cumulative line follow. "Получено в 2023" was wrong
     // for every dividend whose cash landed in the next calendar year — 36 of them in
     // one snapshot, DOX among them: register closed 28.12.2023, paid 26.01.2024.
-    ["Чистые дивиденды", totals.dividendsNetUsd, year ? `По отсечке в ${year}` : "После налогов"],
+    ["Чистые дивиденды", totals.dividendsNetUsd, period ? `По отсечке в ${period}` : "После налогов"],
     ["Итог по инструментам", totals.totalResultUsd,
-      year ? `За ${year}, без нереализованного` : "Без процентов и валютных конверсий"],
+      period ? `За ${period}, без нереализованного` : "Без процентов и валютных конверсий"],
   ];
   byId("kpiContext").textContent = filterContext(rows);
   byId("kpiGrid").innerHTML = cards.map(([label, value, note]) => `
@@ -2795,60 +2803,194 @@ function renderLiveNote() {
 
 /* ---------------------------------------------------------------- filters --- */
 
-function populateSelect(select, values, defaultLabel, compare = null) {
-  const current = select.value;
-  select.innerHTML = `<option value="">${escapeHtml(defaultLabel)}</option>` + values
-    .filter(Boolean)
-    .sort(compare || ((left, right) => left.localeCompare(right)))
-    .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
-    .join("");
-  select.value = current;
-}
+/**
+ * Шесть фильтров одного устройства, описанные данными, а не шестью копиями кода.
+ *
+ * Раньше класс активов был множественным выбором на `<details>`, а остальные четыре —
+ * обычными `<select>` на одно значение. Отсюда и разница в поведении: подпись селекта
+ * менялась на выбранное значение («Опционы + Акции и ETF» вместо «Инструменты»), и
+ * из-за этого слот приходилось держать фиксированной ширины — иначе соседние кнопки
+ * прыгали при каждом выборе. Теперь подпись у всех постоянная, выбор виден каёмкой,
+ * ширина берётся по слову, а что именно выбрано, печатает строка итогов под таблицей.
+ *
+ * `read`/`write` вместо одного общего хранилища: у класса активов другая роль. Он
+ * запоминается между сессиями и перерисовывает страницу целиком, потому что отвечает
+ * на вопрос «про что мы вообще смотрим»; остальные пять — срез таблицы и живут до
+ * перезагрузки. Свести их в одно хранилище значило бы либо запоминать год — и однажды
+ * открыть панель, показывающую позапрошлый год без единого признака этого, — либо
+ * перестать запоминать классы.
+ */
+const ALERT_KIND_LABELS = { BUY_BELOW: "Купить", SELL_ABOVE: "Продать", DATE: "На дату" };
 
-function renderFilterOptions(rows) {
-  populateSelect(byId("currencyFilter"), [...new Set(rows.map((row) => row.currency))], "Все валюты");
-  // Every year in which anything at all happened: an execution, a dividend, a fee.
+const MULTI_FILTERS = [
+  {
+    id: "assetScope",
+    read: () => state.assetScope,
+    write: (picked) => { state.assetScope = picked; persistScope(); },
+    options: () => scopeUniverse().map((value) => [value, ASSET_CLASS_LABELS[value] || value]),
+    after: () => redrawScopedBlocks(),
+  },
+  {
+    id: "alertScope",
+    read: () => state.picks.alert,
+    write: (picked) => { state.picks.alert = picked; },
+    // Список фиксированный, а не «какие правила сейчас есть»: перечень, который то
+    // короче, то длиннее, читается как неисправность, а пункт, не выбравший ничего,
+    // честно показывает, что уведомлений такого рода нет ни на одном инструменте.
+    options: () => ALERT_KINDS.map((kind) => [kind, ALERT_KIND_LABELS[kind]]),
+    after: () => renderRows(),
+  },
+  {
+    id: "directionScope",
+    read: () => state.picks.direction,
+    write: (picked) => { state.picks.direction = picked; },
+    options: () => [["LONG", "Long"], ["SHORT", "Short"]],
+    after: () => renderRows(),
+  },
+  {
+    id: "currencyScope",
+    read: () => state.picks.currency,
+    write: (picked) => { state.picks.currency = picked; },
+    options: () => [...new Set((state.payload?.rows || []).map((row) => row.currency).filter(Boolean))]
+      .map(String)
+      .sort((left, right) => left.localeCompare(right))
+      .map((value) => [value, value]),
+    after: () => renderRows(),
+  },
+  {
+    id: "resultScope",
+    read: () => state.picks.result,
+    write: (picked) => { state.picks.result = picked; },
+    options: () => [["profit", "Прибыльные"], ["loss", "Убыточные"]],
+    after: () => renderRows(),
+  },
+  {
+    id: "periodScope",
+    read: () => state.picks.period,
+    write: (picked) => { state.picks.period = picked; },
+    // Свежие сверху: смотрят почти всегда недавний год.
+    options: () => [...payloadYears()].sort((left, right) => right.localeCompare(left)).map((year) => [year, year]),
+    after: () => renderRows(),
+  },
+];
+
+const filterById = (id) => MULTI_FILTERS.find((def) => def.id === id);
+
+/** Годы, в которые с инструментами вообще что-то происходило: сделка, дивиденд, сбор. */
+function payloadYears() {
   const years = new Set();
-  for (const row of rows) {
+  for (const row of state.payload?.rows || []) {
     for (const cycle of row.cycles || []) {
       for (const trade of cycle.trades || []) years.add(String(trade.timestamp || "").slice(0, 4));
-      // The same date `projectRowToYear` files the event under, or the list could
-      // offer a year with nothing in it and withhold one that has something.
+      // Та же дата, под которой событие подшивает `projectRowToYears`, — иначе список
+      // предложил бы год, в котором ничего нет, и утаил бы тот, в котором есть.
       for (const event of cycle.cashEvents || []) years.add(String(cashEventDate(event) || "").slice(0, 4));
     }
   }
   years.delete("");
-  // Newest first: the year being looked at is almost always a recent one.
-  populateSelect(byId("yearFilter"), [...years], "Любой год", (a, b) => b.localeCompare(a));
-  renderScopeFilter();
+  return years;
 }
 
-/** The classes present in the payload, as a plain multiple choice. */
-function renderScopeFilter() {
-  const universe = scopeUniverse();
-  byId("assetScopeOptions").innerHTML = universe.map((value) => {
-    const checked = !state.assetScope.size || state.assetScope.has(value);
-    return `<label class="scope-option">
+/** Выбор сужает показ, только если что-то ОСТАВЛЯЕТ за бортом. */
+function filterNarrowed(def) {
+  const picked = def.read();
+  if (!picked.size) return false;
+  return def.options().some(([value]) => !picked.has(value));
+}
+
+/**
+ * Забыть выбранное, чего в текущем payload больше нет.
+ *
+ * Без этого валюта или год, выбранные при одном снимке, переживают в следующий и
+ * читаются как сужение по несуществующему признаку, — а если исчезло всё выбранное,
+ * опустошают таблицу без единой видимой причины.
+ */
+function pruneMultiFilters() {
+  for (const def of MULTI_FILTERS) {
+    if (def.id === "assetScope") continue;   // у него свой pruneScope, он вызывается раньше
+    const universe = new Set(def.options().map(([value]) => value));
+    const picked = def.read();
+    for (const value of [...picked]) if (!universe.has(value)) picked.delete(value);
+  }
+}
+
+/**
+ * Подсветка каёмкой и кнопка «Выбрать все» — отдельно от перерисовки флажков.
+ *
+ * Отдельно, потому что вызывается в двух разных случаях. Перерисовка списка нужна,
+ * когда сменился payload; после клика по флажку она вредна — переписанный innerHTML
+ * уводит фокус из-под пальца прямо посреди выбора. Но подсветка обновиться обязана и
+ * тогда: у пяти из шести фильтров `after` перерисовывает таблицу и до самого фильтра
+ * не дотягивается, и первая редакция именно так и оставляла каёмку погашенной при
+ * действующем сужении — выбор работал, а признака выбора на экране не было.
+ */
+function refreshFilterAffordance(def) {
+  const narrowed = filterNarrowed(def);
+  byId(def.id).querySelector("summary").classList.toggle("is-narrowed", narrowed);
+  byId(def.id + "All").hidden = !narrowed;
+}
+
+function renderMultiFilter(def) {
+  const options = def.options();
+  const picked = def.read();
+  byId(def.id + "Options").innerHTML = options.length
+    ? options.map(([value, label]) => {
+      const checked = !picked.size || picked.has(value);
+      return `<label class="scope-option">
       <input type="checkbox" value="${escapeHtml(value)}"${checked ? " checked" : ""} />
-      <span>${escapeHtml(ASSET_CLASS_LABELS[value] || value)}</span>
+      <span>${escapeHtml(label)}</span>
     </label>`;
-  }).join("");
-  const label = byId("assetScopeSummary");
-  label.textContent = scopeLabel();
-  label.closest("summary").classList.toggle("is-narrowed", scopeNarrowed());
-  byId("assetScopeAll").hidden = !scopeNarrowed();
+    }).join("")
+    : `<p class="scope-empty">нечего выбирать</p>`;
+  refreshFilterAffordance(def);
 }
 
-/** Reads the boxes, then redraws everything the scope reaches. */
-function applyScope() {
-  const boxes = [...byId("assetScopeOptions").querySelectorAll("input[type=checkbox]")];
-  const picked = boxes.filter((box) => box.checked).map((box) => box.value);
-  // Unchecking the last box would leave a page with nothing on it and no way back
-  // except the reset button, so an empty pick means every class, same as the default.
-  state.assetScope = new Set(picked.length && picked.length < boxes.length ? picked : []);
-  persistScope();
-  redrawScopedBlocks();
+function renderMultiFilters() {
+  for (const def of MULTI_FILTERS) renderMultiFilter(def);
 }
+
+/** Читает флажки и перерисовывает ровно то, до чего этот фильтр дотягивается. */
+function applyMultiFilter(def) {
+  const boxes = [...byId(def.id + "Options").querySelectorAll("input[type=checkbox]")];
+  const picked = boxes.filter((box) => box.checked).map((box) => box.value);
+  // Снять последний флажок значило бы оставить страницу пустой и без пути назад, кроме
+  // кнопки сброса, поэтому пустой выбор — это «всё», как и выбор всего.
+  def.write(new Set(picked.length && picked.length < boxes.length ? picked : []));
+  refreshFilterAffordance(def);
+  def.after();
+}
+
+/** Подпись выбранного для строки итогов — там, где раньше её печатал сам фильтр. */
+function multiFilterLabel(def) {
+  if (!filterNarrowed(def)) return "";
+  const labels = new Map(def.options());
+  return [...def.read()]
+    .sort((left, right) => String(left).localeCompare(String(right)))
+    .map((value) => labels.get(value) || value)
+    .join(" + ");
+}
+
+/** Инструменты, на которых висит уведомление, по видам. */
+function alertKindsByConid() {
+  const map = new Map();
+  for (const rule of state.alertRules || []) {
+    const conid = String(rule.conid || "");
+    if (!conid) continue;
+    if (!map.has(conid)) map.set(conid, new Set());
+    map.get(conid).add(String(rule.kind || ""));
+  }
+  return map;
+}
+
+function renderFilterOptions() {
+  pruneMultiFilters();
+  renderMultiFilters();
+}
+
+/* Класс активов рисуется и применяется тем же механизмом, что и остальные пять.
+   Имена оставлены: их зовут из мест, которым про механизм знать незачем. */
+function renderScopeFilter() { renderMultiFilter(filterById("assetScope")); }
+function applyScope() { applyMultiFilter(filterById("assetScope")); }
 
 /** Everything the class selection is allowed to change, and nothing else. */
 function redrawScopedBlocks() {
@@ -2964,9 +3106,7 @@ function renderSortHeaders() {
 }
 
 function activeFilterCount() {
-  return ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]
-    .filter((id) => byId(id).value).length
-    + (scopeNarrowed() ? 1 : 0)
+  return MULTI_FILTERS.filter(filterNarrowed).length
     + (byId("searchInput").value.trim() ? 1 : 0)
     + (state.activeTab === "all" ? 0 : 1);
 }
@@ -2993,8 +3133,17 @@ const CORPORATE_ACTIONS = new Set(["TO", "TC", "IC", "SO", "SD"]);
  *
  * Returns null when nothing happened in the year, which is what hides the row.
  */
-function projectRowToYear(row, year) {
-  const inYear = (stamp) => String(stamp || "").slice(0, 4) === year;
+/**
+ * Строка, пересчитанная под выбранные календарные годы.
+ *
+ * Годов может быть несколько, и это не усложнение, а тот же вопрос на более широком
+ * окне: суммы, средние цены входа и выхода, первая и последняя даты уже собираются по
+ * всему, что прошло отбор, — менялось только само правило отбора. Единственное, чего
+ * тут по-прежнему нет, — позиционные величины: рыночная стоимость и нереализованное
+ * описывают сегодня и не принадлежат ни одному прошедшему году.
+ */
+function projectRowToYears(row, years) {
+  const inYear = (stamp) => years.has(String(stamp || "").slice(0, 4));
   let realised = 0;
   let gross = 0;
   let withheld = 0;
@@ -3060,7 +3209,7 @@ function projectRowToYear(row, year) {
   const dividendsNet = gross + withheld;
   return {
     ...row,
-    projectedYear: year,
+    projectedYear: [...years].sort().join(", "),
     // The openness of the source row, for the status pill, the grouping and the
     // "сейчас" cell: the projected quantity below is null and says nothing about it.
     openNow: isOpen(row),
@@ -3104,31 +3253,41 @@ function projectRowToYear(row, year) {
 
 function filteredRows() {
   const search = byId("searchInput").value.trim().toLowerCase();
-  const direction = byId("directionFilter").value;
-  const currency = byId("currencyFilter").value;
-  const profit = byId("profitFilter").value;
-  const year = byId("yearFilter").value;
-  // The tab and the direction describe the position as it stands, so they are applied
-  // to the row itself. The result filter asks about money, so it has to wait until the
-  // money is the year's.
+  const { direction, currency, result: resultPick, period, alert } = state.picks;
+  // Уведомления — признак не строки, а отдельного слоя правил, поэтому связь строится
+  // один раз на отбор, а не ищется заново для каждой строки.
+  const alerts = alert.size ? alertKindsByConid() : null;
+  // Вкладка, направление, валюта и уведомления описывают позицию как она есть — они
+  // применяются к самой строке. Фильтр результата спрашивает про деньги, поэтому ждёт,
+  // пока деньги станут деньгами выбранного периода.
   const rows = [];
   for (const source of state.payload?.rows || []) {
     if (state.activeTab === "open" && !isOpen(source)) continue;
     if (state.activeTab === "closed" && isOpen(source)) continue;
     if (state.activeTab === "review" && source.status !== "REVIEW" && !isQuarantined(source)) continue;
     if (!inScope(source)) continue;
-    if (direction && source.direction !== direction) continue;
-    if (currency && source.currency !== currency) continue;
+    if (direction.size && !direction.has(source.direction)) continue;
+    if (currency.size && !currency.has(String(source.currency))) continue;
+    if (alerts) {
+      const kinds = alerts.get(String(source.conid));
+      if (!kinds || ![...alert].some((kind) => kinds.has(kind))) continue;
+    }
     if (search) {
       const haystack = [source.instrument, source.symbol, source.conid, ...(source.symbolHistory || [])]
         .join(" ").toLowerCase();
       if (!haystack.includes(search)) continue;
     }
-    const row = year ? projectRowToYear(source, year) : source;
+    const row = period.size ? projectRowToYears(source, period) : source;
     if (!row) continue;
-    const result = numberValue(row.totalResultUsd) || 0;
-    if (profit === "profit" && result <= 0) continue;
-    if (profit === "loss" && result >= 0) continue;
+    const total = numberValue(row.totalResultUsd) || 0;
+    // Оба выбранных сразу — это «прибыльные ИЛИ убыточные», то есть всё, кроме нуля;
+    // именно так и читается множественный выбор, и именно это делает общее правило
+    // «выбрано всё = не сужаем» неверным здесь ровно в одном месте: ноль. Он отсеян
+    // сознательно — инструмент, закрывшийся ровно в ноль, не является ни тем ни другим.
+    if (resultPick.size) {
+      const matches = (resultPick.has("profit") && total > 0) || (resultPick.has("loss") && total < 0);
+      if (!matches) continue;
+    }
     rows.push(row);
   }
   return sortRows(rows);
@@ -3648,7 +3807,7 @@ function detailHtml(row) {
         </section>
         <section class="detail-section"><h3>Позиционные циклы</h3>${
           row.projectedYear
-            ? `<p class="detail-note">Показаны циклы, затронутые ${escapeHtml(row.projectedYear)} годом. Цифры внутри цикла — за весь цикл целиком, а не за год.</p>`
+            ? `<p class="detail-note">Показаны циклы, затронутые выбранным периодом (${escapeHtml(row.projectedYear)}). Цифры внутри цикла — за весь цикл целиком, а не за период.</p>`
             : ""
         }<div class="cycle-list">${cycleMarkup(row)}</div>${levelsMarkup(row)}</section>
       </div>
@@ -4058,7 +4217,7 @@ function renderDashboard(payload) {
   applyCollapsed();
   renderCharts();
   alignHeroSide();
-  renderFilterOptions(payload.rows || []);
+  renderFilterOptions();
   renderRows();
   renderIssues(payload);
   renderLiveNote();
@@ -4124,18 +4283,17 @@ function lockDashboard(message = "") {
   scopeCache = null;
   portfolioBody.innerHTML = "";
   byId("searchInput").value = "";
-  // The option lists were built from the payload, so they are emptied the same way
-  // they were filled — down to the one default option `populateSelect` always writes.
-  populateSelect(byId("currencyFilter"), [], "Все валюты");
-  populateSelect(byId("yearFilter"), [], "Любой год");
-  // Mirrors `renderScopeFilter` with nothing to show: no class checkboxes, the
-  // default summary, no narrowed highlight, and the popover closed.
-  byId("assetScopeOptions").innerHTML = "";
-  const scopeLabelNode = byId("assetScopeSummary");
-  scopeLabelNode.textContent = "Все классы";
-  scopeLabelNode.closest("summary").classList.remove("is-narrowed");
-  byId("assetScopeAll").hidden = true;
-  byId("assetScope").open = false;
+  // Списки строились из payload — гасятся тем же способом: ни одного флажка, ни
+  // подсветки выбора, ни открытого меню. Выбранное при этом ЗАБЫВАЕТСЯ: оставить его
+  // за замком значило бы, что после разблокировки таблица показывает срез, о котором
+  // на экране нет ни следа.
+  for (const def of MULTI_FILTERS) {
+    def.write(new Set());
+    byId(def.id + "Options").innerHTML = "";
+    byId(def.id).querySelector("summary").classList.remove("is-narrowed");
+    byId(def.id + "All").hidden = true;
+    byId(def.id).open = false;
+  }
   // Skips an id the document does not have: locking must clear what is there, not
   // throw part-way through and leave the rest of the plaintext on the page.
   for (const id of CLEARED_ON_LOCK) {
@@ -4365,39 +4523,46 @@ byId("searchInput").addEventListener("input", () => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
-["directionFilter", "currencyFilter", "profitFilter", "yearFilter"].forEach((id) => {
-  byId(id).addEventListener("change", renderRows);
-});
+for (const def of MULTI_FILTERS) {
+  byId(def.id + "Options").addEventListener("change", () => applyMultiFilter(def));
+  byId(def.id + "All").addEventListener("click", () => {
+    def.write(new Set());
+    renderMultiFilter(def);   // здесь список флажков и правда надо перерисовать: их сняли все
+    def.after();
+  });
+}
 
-byId("assetScopeOptions").addEventListener("change", applyScope);
-
-// <details> only closes on its own summary. A filter that stays open until you find
-// that summary again behaves unlike every other control in the row.
+// <details> закрывается только по своему summary. Фильтр, остающийся открытым, пока до
+// этого summary не доберёшься, ведёт себя не так, как всё остальное в этом ряду. Заодно
+// открытым остаётся ровно один: два раскрытых меню накладываются друг на друга.
 document.addEventListener("click", (event) => {
-  const scope = byId("assetScope");
-  if (scope.open && !scope.contains(event.target)) scope.open = false;
+  for (const def of MULTI_FILTERS) {
+    const node = byId(def.id);
+    if (node.open && !node.contains(event.target)) node.open = false;
+  }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  const scope = byId("assetScope");
-  if (!scope.open) return;
-  scope.open = false;
-  scope.querySelector("summary").focus();
+  const open = MULTI_FILTERS.map((def) => byId(def.id)).find((node) => node.open);
+  if (!open) return;
+  open.open = false;
+  open.querySelector("summary").focus();
 });
-byId("assetScopeAll").addEventListener("click", () => {
-  state.assetScope = new Set();
-  persistScope();
-  redrawScopedBlocks();
-});
+document.addEventListener("toggle", (event) => {
+  const opened = event.target;
+  if (!opened.open || !opened.classList?.contains("scope-filter")) return;
+  for (const def of MULTI_FILTERS) {
+    const node = byId(def.id);
+    if (node !== opened) node.open = false;
+  }
+}, true);
 
 byId("resetFilters").addEventListener("click", () => {
-  for (const id of ["directionFilter", "currencyFilter", "profitFilter", "yearFilter"]) {
-    byId(id).value = "";
-  }
-  state.assetScope = new Set();
-  persistScope();
+  for (const def of MULTI_FILTERS) { def.write(new Set()); renderMultiFilter(def); }
   byId("searchInput").value = "";
   setActiveTab(byId("quickTabs").querySelector('button[data-tab="all"]'));
+  // Один перерисовщик на всех: класс активов дотягивается до шапки и графиков, и он
+  // же перерисовывает таблицу, так что вызывать ещё и renderRows было бы вдвойне.
   redrawScopedBlocks();
 });
 
