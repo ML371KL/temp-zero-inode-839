@@ -1772,6 +1772,68 @@ async function checkFilterRow(ctx) {
       if (!note.includes(first) || !note.includes(second)) {
         failures.push(`строка итогов не называет оба выбранных года: «${note}»`);
       }
+      // Раскрытая карточка под периодом: что периодом не меняется, не меняется.
+      // «Первая сделка» под выбранным 2024 годом показывала первую сделку 2024-го —
+      // это ответ на другой вопрос, и отличить его от настоящего было нельзя.
+      //
+      // Проверка обязана бить по различию, а не по любой строке: у инструмента, вся
+      // жизнь которого внутри выбранного года, спроецированная «первая сделка» равна
+      // настоящей, и первая редакция этой проверки именно так и проходила мимо обеих
+      // подсунутых ошибок. Поэтому строка выбирается та, чей первый год НЕ совпадает
+      // с периодом, а если такой не нашлось — это отказ, а не тихий пропуск.
+      const cardOf = async (rowKey) => {
+        const open = async () => session.page.evaluate((key) => {
+          const tr = document.querySelector(`tr.data-row[data-row-key="${key}"]`);
+          if (tr) tr.click();
+          return Boolean(tr);
+        }, rowKey);
+        if (!await open()) return null;
+        await sleep(SETTLE_MS);
+        const card = await session.page.evaluate(() => Object.fromEntries(
+          [...document.querySelectorAll(".detail-row .detail-item")].map((node) => [
+            node.querySelector("span")?.textContent?.trim() || "",
+            node.querySelector("strong")?.textContent?.trim() || "",
+          ]),
+        ));
+        await open();
+        await sleep(150);
+        return card;
+      };
+
+      await resetAll();
+      const lifeCards = {};
+      for (const rowKey of await readRowKeys()) {
+        const card = await cardOf(rowKey);
+        if (card && card["Первая сделка"]) lifeCards[rowKey] = card;
+      }
+      // Пара «год + инструмент», на которой различие вообще существует: инструмент
+      // жил в этом году, но начался раньше. Перебираем годы, а не берём один наугад.
+      let oldest = null;
+      let target = null;
+      for (const year of years) {
+        await pick("periodScope", [year]);
+        const underPeriod = await readRowKeys();
+        const candidate = underPeriod.find((rowKey) => lifeCards[rowKey]
+          && !lifeCards[rowKey]["Первая сделка"].includes(year));
+        if (candidate) { oldest = year; target = candidate; break; }
+      }
+      if (!target) {
+        failures.push("в фикстуре нет инструмента, который жил бы в году позже своего первого — карточку под периодом проверить нечем");
+      } else {
+        const scoped = await cardOf(target);
+        const whole = lifeCards[target];
+        for (const tile of ["Conid", "Биржа", "Первая сделка", "Себестоимость позиции, AVCO"]) {
+          if (whole[tile] !== undefined && whole[tile] !== scoped[tile]) {
+            failures.push(`«${tile}» изменилась под периодом ${oldest}: «${whole[tile]}» → «${scoped[tile]}»`);
+          }
+        }
+        const flows = Object.keys(scoped).filter((name) => /^(Дивиденды|Комиссии|Прочие сборы)/.test(name));
+        if (!flows.length) {
+          failures.push(`у ${target} под периодом не осталось ни одной плитки-потока — проверка подписи не состоялась`);
+        } else if (!flows.every((name) => name.includes(oldest))) {
+          failures.push(`плитки-потоки под периодом не называют период: ${flows.join(", ")}`);
+        }
+      }
       await resetAll();
     }
 

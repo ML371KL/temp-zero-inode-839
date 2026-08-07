@@ -3210,6 +3210,13 @@ function projectRowToYears(row, years) {
   return {
     ...row,
     projectedYear: [...years].sort().join(", "),
+    // Исходная строка целиком, чтобы карточка могла показать то, что периодом не
+    // меняется. Conid, биржа, первая сделка, история тикеров, себестоимость позиции и
+    // последняя цена продажи описывают инструмент, а не отрезок времени: «первая
+    // сделка» под выбранным 2024 годом показывала первую сделку 2024-го и читалась как
+    // ответ на другой вопрос. Потоки — дивиденды, комиссии, сборы, валютная часть —
+    // остаются за период, и период назван прямо в их подписи.
+    lifetime: row.lifetime || row,
     // The openness of the source row, for the status pill, the grouping and the
     // "сейчас" cell: the projected quantity below is null and says nothing about it.
     openNow: isOpen(row),
@@ -3770,6 +3777,11 @@ function detailHtml(row) {
     present ? `<div class="detail-item"><span>${label}</span><strong>${markup}</strong></div>` : "";
   const foreign = String(row.currency || "USD").toUpperCase() !== "USD";
   const history = (row.symbolHistory || []).filter(Boolean);
+  // Что периодом не меняется, берётся из исходной строки; что меняется — из
+  // спроецированной, и подпись такой плитки называет период. См. `lifetime` в
+  // projectRowToYears.
+  const lifetime = row.lifetime || row;
+  const period = row.projectedYear ? ` · ${row.projectedYear}` : "";
   return `
     <tr class="detail-row"><td colspan="13">
       <div class="detail-wrap">
@@ -3778,27 +3790,27 @@ function detailHtml(row) {
           <div class="detail-grid">
             <div class="detail-item"><span>Conid</span><strong>${escapeHtml(row.conid)}</strong></div>
             <div class="detail-item"><span>Биржа</span><strong>${escapeHtml(row.exchange || "—")}</strong></div>
-            <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(row.firstTradeAt, true)}</strong></div>
-            ${lastExitTileHtml(row)}
+            <div class="detail-item"><span>Первая сделка</span><strong>${formatDate(lifetime.firstTradeAt, true)}</strong></div>
+            ${lastExitTileHtml(lifetime)}
             ${optional("История тикеров",
               escapeHtml(history.join(" → ")), history.length > 1)}
             ${optional("Себестоимость позиции, AVCO",
-              formatMoney(row.openBasis, row.currency, true), isOpen(row))}
+              formatMoney(lifetime.openBasis, lifetime.currency, true), isOpen(lifetime))}
             ${optional("Она же в USD по курсам покупок",
-              formatUsd(row.openBasisUsd), isOpen(row) && foreign)}
-            ${optional("Дивиденды gross",
+              formatUsd(lifetime.openBasisUsd), isOpen(lifetime) && foreign)}
+            ${optional(`Дивиденды gross${escapeHtml(period)}`,
               formatMoney(row.dividendsGross, row.currency, true),
               numberValue(row.dividendsGross))}
-            ${optional("Дивиденды net, после налогов",
+            ${optional(`Дивиденды net, после налогов${escapeHtml(period)}`,
               formatMoney(row.dividendsNet, row.currency, true),
               numberValue(row.dividendsNet))}
-            ${optional("Комиссии",
+            ${optional(`Комиссии${escapeHtml(period)}`,
               `<span class="negative">${formatCost(row.commissionsUsd)}</span>`,
               numberValue(row.commissionsUsd))}
-            ${optional("Прочие сборы",
+            ${optional(`Прочие сборы${escapeHtml(period)}`,
               `<span class="${pnlClass(row.otherFeesUsd)}">${formatUsd(row.otherFeesUsd)}</span>`,
               numberValue(row.otherFeesUsd))}
-            ${optional(`<span title="${escapeHtml("Реализованный P&L складывается из ценовой и валютной частей: валютная — это движение курса между покупкой и продажей")}">Валютная часть реализованного P&amp;L</span>`,
+            ${optional(`<span title="${escapeHtml("Реализованный P&L складывается из ценовой и валютной частей: валютная — это движение курса между покупкой и продажей")}">Валютная часть реализованного P&amp;L</span>${escapeHtml(period)}`,
               `<span class="${pnlClass(row.fxRealizedPnlUsd)}">${formatUsd(row.fxRealizedPnlUsd)}</span>`,
               numberValue(row.fxRealizedPnlUsd))}
           </div>
