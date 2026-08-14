@@ -1889,7 +1889,12 @@ async function checkXss(ctx) {
       return {
         fired: window.__xssFired ?? 0,
         images: document.querySelectorAll("img, iframe, object, embed").length,
-        scripts: document.querySelectorAll("script").length,
+        // Не число, а происхождение. Счёт ломался от любого честного файла —
+        // theme-boot.js добавился, и проверка объявила его внедрением. Сторожить
+        // надо не количество, а то, что ни один скрипт не пришёл со страницей:
+        // внедрённый был бы инлайном или ссылался бы на чужой хост.
+        scripts: [...document.querySelectorAll("script")].map(
+          (element) => element.getAttribute("src") || "инлайн"),
         withHandlers,
         // The sentinel must be present as *text*: that is the proof the string reached
         // the page at all and was rendered rather than parsed.
@@ -1900,7 +1905,13 @@ async function checkXss(ctx) {
 
     if (verdict.fired) failures.push(`injected handlers ran ${verdict.fired} time(s)`);
     if (verdict.images) failures.push(`${verdict.images} injected element(s) exist in the DOM`);
-    if (verdict.scripts > 1) failures.push(`${verdict.scripts} <script> elements; the page has one`);
+    const foreign = verdict.scripts.filter((src) => {
+      if (src === "инлайн") return true;
+      return /^[a-z]+:/i.test(src) && !src.startsWith(ctx.site.origin);
+    });
+    if (foreign.length) {
+      failures.push(`скрипты не со своего origin: ${foreign.join(", ")}`);
+    }
     if (verdict.withHandlers.length) {
       failures.push(`inline handlers present: ${verdict.withHandlers.slice(0, 5).join(", ")}`);
     }
