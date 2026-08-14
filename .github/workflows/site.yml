@@ -75,34 +75,36 @@ jobs:
           set -euo pipefail
           # With retries: a deployment reaches the edge in a moment, not instantly, and
           # a single curl would go red for nothing more than a slow network.
+          ready=no
           for attempt in 1 2 3 4 5 6; do
             page=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/ || true)
             data=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/data/portfolio.enc || true)
             echo "attempt $attempt: page $page, payload $data"
-            if [ "$page" = "200" ] && [ "$data" = "200" ]; then break; fi
+            if [ "$page" = "200" ] && [ "$data" = "200" ]; then ready=yes; break; fi
             sleep $((attempt * 5))
           done
-          [ "$page" = "200" ] && [ "$data" = "200" ] || exit 1
+          if [ "$ready" != "yes" ]; then
+            echo "::error::the published site does not answer 200 on / and /data/portfolio.enc"
+            exit 1
+          fi
 
-          # Каждый выложенный файл обязан отвечать СОБОЙ. Неизвестный путь на этом сайте
-          # возвращает главную страницу с кодом 200, поэтому «страница открылась» ничего
-          # не доказывает: theme-boot.js забыли внести в список выше, и по его адресу
-          # приезжал index.html — тема тихо не работала, а публикация была зелёной.
+          # Every staged file has to answer AS ITSELF. An unknown path on this site
+          # returns the home page with a 200, so "the page is up" proves very little:
+          # theme-boot.js was left out of the copy list above, its address served
+          # index.html, the theme quietly did nothing and the deployment was green.
           missing=0
           for file in site/*; do
             name=$(basename "$file")
-            case $name in index.html) continue ;; esac
-            type=$(curl -sI "https://tzi-839.pages.dev/$name" | tr -d ''                    | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}')
+            [ "$name" = "index.html" ] && continue
+            type=$(curl -sI "https://tzi-839.pages.dev/$name" | tr -d '\r' | tr 'A-Z' 'a-z' | sed -n 's/^content-type: *//p')
             case $name in
-              *.js)  want=javascript ;;
+              *.js) want=javascript ;;
               *.css) want=css ;;
-              *)     want=text ;;
+              *) want=text ;;
             esac
             case $type in
               *"$want"*) echo "ok   $name ($type)" ;;
-              *) echo "FAIL $name отдаётся как ${type:-ничего}, ожидался $want"; missing=1 ;;
+              *) echo "::error::$name is served as ${type:-nothing}, expected $want"; missing=1 ;;
             esac
           done
           exit $missing
-          echo "::error::the published site does not answer 200 on / and /data/portfolio.enc"
-          exit 1
