@@ -56,7 +56,7 @@ jobs:
           # Explicit list rather than "everything": the repository root also holds the
           # README and the workflow directory, and a deployment is not the place to
           # discover that something new landed beside them.
-          cp index.html app.js charts.js styles.css robots.txt site/
+          cp index.html app.js charts.js styles.css robots.txt theme-boot.js site/
           ls -la site
 
       - name: Publish
@@ -79,8 +79,30 @@ jobs:
             page=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/ || true)
             data=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-839.pages.dev/data/portfolio.enc || true)
             echo "attempt $attempt: page $page, payload $data"
-            if [ "$page" = "200" ] && [ "$data" = "200" ]; then exit 0; fi
+            if [ "$page" = "200" ] && [ "$data" = "200" ]; then break; fi
             sleep $((attempt * 5))
           done
+          [ "$page" = "200" ] && [ "$data" = "200" ] || exit 1
+
+          # Каждый выложенный файл обязан отвечать СОБОЙ. Неизвестный путь на этом сайте
+          # возвращает главную страницу с кодом 200, поэтому «страница открылась» ничего
+          # не доказывает: theme-boot.js забыли внести в список выше, и по его адресу
+          # приезжал index.html — тема тихо не работала, а публикация была зелёной.
+          missing=0
+          for file in site/*; do
+            name=$(basename "$file")
+            case $name in index.html) continue ;; esac
+            type=$(curl -sI "https://tzi-839.pages.dev/$name" | tr -d ''                    | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}')
+            case $name in
+              *.js)  want=javascript ;;
+              *.css) want=css ;;
+              *)     want=text ;;
+            esac
+            case $type in
+              *"$want"*) echo "ok   $name ($type)" ;;
+              *) echo "FAIL $name отдаётся как ${type:-ничего}, ожидался $want"; missing=1 ;;
+            esac
+          done
+          exit $missing
           echo "::error::the published site does not answer 200 on / and /data/portfolio.enc"
           exit 1
