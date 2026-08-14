@@ -2075,6 +2075,161 @@ async function checkLayoutAndSvg(ctx) {
 
 /* -------------------------------------------------------------------- main --- */
 
+/**
+ * Вечерняя тёмная тема: с 20:00 до 07:00 по часам устройства.
+ *
+ * Проверяется в настоящем браузере с подменёнными часами, потому что всё, что здесь
+ * важно, происходит до первой отрисовки и зависит от локального времени: `getHours()`
+ * читает часовой пояс машины, и никакой разбор исходника этого не покажет.
+ *
+ * Два свойства, которые легко сломать и оба тихо. Первое: навязанная вечером тёмная
+ * НЕ должна затирать постоянный выбор — иначе один вечер сделает её «последней темой»
+ * навсегда, и правило съест само себя. Второе: граница ровно на 20:00 и 07:00, а не
+ * «где-то вечером»; час до и час после проверяются отдельно, иначе сдвиг на единицу
+ * прошёл бы незамеченным.
+ */
+async function checkEveningTheme(ctx) {
+  const failures = [];
+
+  /* Часы подменяются ДО загрузки страницы: тему ставит theme-boot.js из <head>. */
+  async function openAt(hour, { stored = null, session: sessionStorageTheme = null } = {}) {
+    const session = await openPage(ctx.browser);
+    await session.page.evaluateOnNewDocument(
+      (h, persisted, tonight) => {
+        const Real = Date;
+        const fixed = new Real(2026, 7, 14, h, 30, 0).getTime();
+        function Fake(...args) {
+          return args.length ? new Real(...args) : new Real(fixed);
+        }
+        Fake.now = () => fixed;
+        Fake.parse = Real.parse;
+        Fake.UTC = Real.UTC;
+        Fake.prototype = Real.prototype;
+        window.Date = Fake;
+        try {
+          if (persisted) window.localStorage.setItem("portfolio-ledger:theme", persisted);
+          else window.localStorage.removeItem("portfolio-ledger:theme");
+          if (tonight) {
+            window.sessionStorage.setItem("portfolio-ledger:theme-tonight", tonight);
+          } else {
+            window.sessionStorage.removeItem("portfolio-ledger:theme-tonight");
+          }
+        } catch (error) { /* приватный режим здесь не проверяется */ }
+      },
+      hour, stored, sessionStorageTheme,
+    );
+    await goto(session.page, ctx.site.origin);
+    return session;
+  }
+
+  async function readState(page) {
+    return page.evaluate(() => ({
+      applied: document.documentElement.getAttribute("data-theme"),
+      persisted: window.localStorage.getItem("portfolio-ledger:theme"),
+      tonight: window.sessionStorage.getItem("portfolio-ledger:theme-tonight"),
+    }));
+  }
+
+  /* Границы: час внутри окна и час снаружи, с обеих сторон. */
+  const cases = [
+    { hour: 19, stored: "light", expect: "light", why: "за час до восьми вечера ещё день" },
+    { hour: 20, stored: "light", expect: "dark", why: "ровно в 20:00 окно уже началось" },
+    { hour: 23, stored: "light", expect: "dark", why: "поздний вечер" },
+    { hour: 3, stored: "light", expect: "dark", why: "после полуночи окно не обрывается" },
+    { hour: 6, stored: "light", expect: "dark", why: "последний час окна" },
+    { hour: 7, stored: "light", expect: "light", why: "ровно в 07:00 окно закончилось" },
+    { hour: 12, stored: "dark", expect: "dark", why: "днём действует свой выбор" },
+    { hour: 12, stored: "light", expect: "light", why: "днём действует свой выбор" },
+    { hour: 21, stored: null, expect: "dark", why: "вечером без выбора всё равно тёмная" },
+  ];
+
+  for (const item of cases) {
+    const session = await openAt(item.hour, { stored: item.stored });
+    try {
+      const state = await readState(session.page);
+      if (state.applied !== item.expect) {
+        failures.push(
+          `${item.hour}:30 при выборе ${item.stored ?? "«не выбрано»"} → `
+          + `${state.applied ?? "системная"}, ожидалась ${item.expect} (${item.why})`,
+        );
+      }
+      /* Главное: постоянный выбор не тронут ничем из этого. */
+      if (state.persisted !== item.stored) {
+        failures.push(
+          `${item.hour}:30 затёр постоянный выбор: было ${item.stored ?? "пусто"}, `
+          + `стало ${state.persisted ?? "пусто"}`,
+        );
+      }
+      failures.push(...consoleFailures(session));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /* Переключение вечером: действует, но живёт только до закрытия вкладки. */
+  {
+    const session = await openAt(21, { stored: "dark" });
+    try {
+      await session.page.click("#themeButton");
+      const state = await readState(session.page);
+      if (state.applied !== "light") {
+        failures.push(`вечером переключатель не сработал: ${state.applied}`);
+      }
+      if (state.tonight !== "light") {
+        failures.push("вечерний выбор не запомнен на время вкладки");
+      }
+      if (state.persisted !== "dark") {
+        failures.push(
+          `вечерний выбор затёр постоянный: стало ${state.persisted ?? "пусто"}, `
+          + "а наутро должно вернуться dark",
+        );
+      }
+      failures.push(...consoleFailures(session));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /* Тот же вечерний выбор переживает перезагрузку страницы — это и есть «до конца визита». */
+  {
+    const session = await openAt(21, { stored: "dark", session: "light" });
+    try {
+      const state = await readState(session.page);
+      if (state.applied !== "light") {
+        failures.push(`вечерний выбор не пережил перезагрузку: ${state.applied}`);
+      }
+      failures.push(...consoleFailures(session));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /* Днём переключатель по-прежнему пишет в постоянную память. */
+  {
+    const session = await openAt(12, { stored: "dark" });
+    try {
+      await session.page.click("#themeButton");
+      const state = await readState(session.page);
+      if (state.applied !== "light" || state.persisted !== "light") {
+        failures.push(
+          `днём выбор не запомнился навсегда: применено ${state.applied}, `
+          + `сохранено ${state.persisted ?? "пусто"}`,
+        );
+      }
+      failures.push(...consoleFailures(session));
+    } finally {
+      await session.close();
+    }
+  }
+
+  ctx.report.record(
+    "тема: с 20:00 до 07:00 тёмная, постоянный выбор не затирается",
+    failures,
+    `${cases.length} часов + переключение`,
+  );
+}
+
+
 async function main() {
   const envelope = JSON.parse(readFileSync(FIXTURE_FILE, "utf8"));
   const password = readFileSync(PASSWORD_FILE, "utf8").trim();
@@ -2111,6 +2266,7 @@ async function main() {
     await checkAuditGaps(ctx);
     await checkXss(ctx);
     await checkLayoutAndSvg(ctx);
+    await checkEveningTheme(ctx);
   } finally {
     await browser.close();
     await site.close();

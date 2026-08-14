@@ -1119,14 +1119,15 @@ function pnlClass(value) {
 
 /* ------------------------------------------------------------------ theme --- */
 
-const THEME_KEY = "portfolio-ledger:theme";
+/*
+ * Правило темы живёт в theme-boot.js: он подключён в <head> и ставит её до первой
+ * отрисовки, поэтому здесь только пользуемся, а не повторяем. Вторая копия правила
+ * однажды разошлась бы с первой — и вечер начинался бы в разное время в разных местах.
+ */
+const themeRule = window.__theme;
 
 function storedTheme() {
-  try {
-    return window.localStorage.getItem(THEME_KEY);
-  } catch {
-    return null;
-  }
+  return themeRule.resolve();
 }
 
 function applyTheme(theme) {
@@ -1149,17 +1150,17 @@ applyTheme(storedTheme());
 
 byId("themeButton").addEventListener("click", () => {
   const next = applyTheme(storedTheme()) ? "light" : "dark";
-  try {
-    window.localStorage.setItem(THEME_KEY, next);
-  } catch {
-    /* private mode: the choice simply does not persist */
-  }
+  /* Вечером выбор живёт до закрытия вкладки и не трогает постоянную память: иначе
+     один вечер сделал бы тёмную «последней темой» навсегда, и правило съело бы себя. */
+  themeRule.remember(next);
   applyTheme(next);
   if (state.payload) renderCharts();
 });
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-  if (!storedTheme()) applyTheme(null);
+  /* Системная тема ведёт страницу только днём и только когда своего выбора нет:
+     вечером тёмная стоит намеренно, и смена системной её не отменяет. */
+  if (!themeRule.isNight() && !themeRule.stored()) applyTheme(null);
 });
 
 /* ------------------------------------------------------------- collapsing --- */
