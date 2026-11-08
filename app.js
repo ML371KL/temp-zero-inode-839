@@ -1595,7 +1595,7 @@ function buildupItems(payload) {
   const extras = [
     ["Проценты брокера", accountCash.interestUsd, "начислены на остаток"],
     ["Сборы по счёту", accountCash.accountFeesUsd, "подписки и обслуживание"],
-    ["Валютные конверсии", accountCash.currencyResultUsd, "результат обмена валют"],
+    ["Валютный результат", accountCash.currencyResultUsd, "обмен валют и переоценка остатков в AUD, CAD, GBP, JPY"],
     ["Прочий кэш", accountCash.otherCashUsd, ""],
     ["Неклассифицированный кэш", accountCash.unclassifiedCashUsd,
       `${Number(accountCash.unclassifiedCashCount || 0)} событий`],
@@ -1612,23 +1612,21 @@ function buildupItems(payload) {
   // first one. With no account-level components it repeats the line above it
   // verbatim, and a table that states the same number twice reads like an error.
   if (hasAccountLevel) {
-    // Everything above is booked at the rates of the day it happened. The account is
-    // worth what it is worth today, and foreign cash that was never converted sits
-    // between the two. Leaving it out ended the table 333 dollars away from the
-    // headline with nothing to say why.
+    // What the lines above leave between themselves and the headline. Until
+    // 8 November 2026 this was the revaluation of foreign cash and ran to hundreds of
+    // dollars; that revaluation is inside the currency line now, so what is left is
+    // cash the books cannot account for — normally cents.
     const residual = numberValue(payload.accountIdentity?.differenceUsd);
     if (residual) {
-      // Normally this gap is the unconverted foreign cash. With an instrument in
-      // quarantine it also holds that instrument's real money, which the totals
-      // above deliberately leave out — so it stops being "revaluation" and has to
-      // stop claiming to be.
+      // With an instrument in quarantine the gap also holds that instrument's real
+      // money, which the totals above deliberately leave out.
       const quarantined = state.quarantined.size > 0;
       items.push({
-        label: quarantined ? "Не отнесено к позициям" : "Переоценка валютных остатков",
+        label: quarantined ? "Не отнесено к позициям" : "Не объяснено",
         value: residual,
         note: quarantined
-          ? "переоценка непереведённых валютных остатков плюс реальные деньги инструментов, вынесенных за пределы итогов — см. предупреждение выше"
-          : "непереведённые остатки в AUD, CAD, GBP и JPY стоят сегодня иначе, чем в день, когда попали на счёт",
+          ? "реальные деньги инструментов, вынесенных за пределы итогов — см. предупреждение выше"
+          : "разница между стоимостью счёта и суммой строк выше; в норме — центы",
       });
     }
     items.push({
@@ -2341,7 +2339,7 @@ function prepareCharts(payload) {
     state.timelineBridge = `Конец линии ${formatUsd(lineEnd)} `
       + `${term("нереализованный P&L", unrealized)} `
       + `${term("валютные остатки", residual)} `
-      + `${term(state.quarantined.size ? "не отнесено к позициям" : "переоценка", revaluation)} `
+      + `${term(state.quarantined.size ? "не отнесено к позициям" : "не объяснено", revaluation)} `
       + `= ${formatUsd(headline)} в шапке.`;
   }
   updateTimelineNote();
@@ -2555,7 +2553,7 @@ function renderAccountPanel(payload) {
   const notCounted = [
     ["Проценты брокера", accountCash.interestUsd],
     ["Сборы по счёту", accountCash.accountFeesUsd],
-    ["Результат FX-конверсий", accountCash.currencyResultUsd],
+    ["Валютный результат", accountCash.currencyResultUsd],
     ["Прочий кэш", accountCash.otherCashUsd],
     ["Неклассифицированный кэш", accountCash.unclassifiedCashUsd],
   ].filter(([, value]) => numberValue(value) !== null && numberValue(value) !== 0);
